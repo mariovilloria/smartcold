@@ -30,6 +30,8 @@ void setup()
   Serial.print("Red configuracion: ");
   Serial.println(nombreAP);
 
+  wifiManager.setConnectTimeout(30);
+  wifiManager.setConfigPortalTimeout(180);
   bool conectado = wifiManager.autoConnect(nombreAP.c_str());
 
   if (!conectado)
