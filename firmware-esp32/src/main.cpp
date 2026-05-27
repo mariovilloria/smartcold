@@ -41,7 +41,11 @@ void enviarTelemetria()
   Serial.println(body);
 
   int httpCode = http.POST(body);
-
+  if (httpCode <= 0)
+  {
+    Serial.print("ERROR HTTP: ");
+    Serial.println(http.errorToString(httpCode));
+  }
   Serial.print("HTTP CODE: ");
   Serial.println(httpCode);
 
