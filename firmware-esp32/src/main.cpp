@@ -1,11 +1,57 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiManager.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
 
 const bool BORRAR_WIFI_AL_INICIAR = false;
 
 WiFiManager wifiManager;
+void enviarTelemetria()
+{
 
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.println("❌ WIFI NO CONECTADO");
+    return;
+  }
+
+  HTTPClient http;
+
+  String url = "http://192.168.18.8:8000/api/telemetry";
+
+  http.begin(url);
+
+  http.addHeader("Content-Type", "application/json");
+
+  JsonDocument doc;
+
+  doc["device_id"] = "SmartCold-5494";
+  doc["temperature"] = 4.5;
+  doc["humidity"] = 65;
+  doc["rssi"] = WiFi.RSSI();
+  doc["online"] = true;
+
+  String body;
+
+  serializeJson(doc, body);
+
+  Serial.println();
+  Serial.println("📡 ENVIANDO TELEMETRIA...");
+  Serial.println(body);
+
+  int httpCode = http.POST(body);
+
+  Serial.print("HTTP CODE: ");
+  Serial.println(httpCode);
+
+  String response = http.getString();
+
+  Serial.println("RESPUESTA:");
+  Serial.println(response);
+
+  http.end();
+}
 void setup()
 {
   Serial.begin(115200);
@@ -48,6 +94,7 @@ void setup()
   Serial.println(WiFi.localIP());
   Serial.print("RSSI: ");
   Serial.println(WiFi.RSSI());
+  enviarTelemetria();
 }
 
 void loop()
