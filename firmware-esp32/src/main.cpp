@@ -27,7 +27,7 @@ void enviarTelemetria()
   JsonDocument doc;
 
   doc["device_id"] = "SmartCold-5494";
-  doc["temperature"] = 4.5;
+  doc["temperature"] = 7;
   doc["humidity"] = 65;
   doc["rssi"] = WiFi.RSSI();
   doc["online"] = true;

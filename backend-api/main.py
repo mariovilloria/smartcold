@@ -23,6 +23,7 @@ db = firestore.client()
 OFFLINE_WARNING_SECONDS = 120
 OFFLINE_REAL_SECONDS = 300
 HISTORY_INTERVAL_SECONDS = 300
+
 # =====================================
 # BASE TEMPORAL EN MEMORIA
 # =====================================
@@ -102,6 +103,7 @@ class DeviceConfigUpdate(BaseModel):
     differential: float
     alarm_enabled: bool = True
     compressor_control_enabled: bool = False
+    compressor_min_off_seconds: int = 180
 
 
 # =====================================
@@ -136,22 +138,69 @@ def receive_telemetry(data: TelemetryData):
     print("RSSI:", data.rssi)
     print("Online:", data.online)
     print("Timestamp:", datetime.now())
+
+    now = datetime.now()
+    now_iso = now.isoformat()
+
     config_doc = db.collection("device_config").document(data.device_id).get()
     config = config_doc.to_dict() if config_doc.exists else {}
+
+    status_doc = db.collection("device_status").document(data.device_id).get()
+    current_status = status_doc.to_dict() if status_doc.exists else {}
+
     alarm = False
     alarm_reason = None
+
     if config.get("alarm_enabled", False):
         temp_min = config.get("temp_min_alarm")
         temp_max = config.get("temp_max_alarm")
+
         if temp_min is not None and data.temperature < temp_min:
             alarm = True
             alarm_reason = "TEMP_LOW"
+
         if temp_max is not None and data.temperature > temp_max:
             alarm = True
             alarm_reason = "TEMP_HIGH"
 
-    status_doc = db.collection("device_status").document(data.device_id).get()
-    current_status = status_doc.to_dict() if status_doc.exists else {}
+    previous_compressor_state = current_status.get("compressor_should_be_on", False)
+
+    compressor_should_be_on = previous_compressor_state
+    compressor_last_off_at = current_status.get("compressor_last_off_at")
+    compressor_can_turn_on = True
+    compressor_wait_seconds_remaining = 0
+
+    if compressor_last_off_at:
+        last_off_dt = datetime.fromisoformat(compressor_last_off_at)
+        seconds_since_last_off = int((now - last_off_dt).total_seconds())
+
+        min_off_seconds = config.get("compressor_min_off_seconds", 180)
+
+        if seconds_since_last_off < min_off_seconds:
+            compressor_can_turn_on = False
+            compressor_wait_seconds_remaining = min_off_seconds - seconds_since_last_off
+
+    if config.get("compressor_control_enabled", False):
+        setpoint = config.get("setpoint")
+        differential = config.get("differential")
+
+        if setpoint is not None and differential is not None:
+            turn_on_temp = setpoint + differential
+
+            if data.temperature >= turn_on_temp and compressor_can_turn_on:
+                compressor_should_be_on = True
+
+            elif data.temperature <= setpoint:
+                compressor_should_be_on = False
+    else:
+        compressor_should_be_on = False
+
+    compressor_turned_off_now = (
+        previous_compressor_state is True and compressor_should_be_on is False
+    )
+
+    if compressor_turned_off_now:
+        compressor_last_off_at = now_iso
 
     should_save_history = False
 
@@ -161,13 +210,10 @@ def receive_telemetry(data: TelemetryData):
         should_save_history = True
     else:
         last_history_dt = datetime.fromisoformat(last_history_at)
-        seconds_since_last_history = int(
-            (datetime.now() - last_history_dt).total_seconds()
-        )
+        seconds_since_last_history = int((now - last_history_dt).total_seconds())
 
         if seconds_since_last_history >= HISTORY_INTERVAL_SECONDS:
             should_save_history = True
-    now_iso = datetime.now().isoformat()
 
     if should_save_history:
         history_data = {
@@ -177,10 +223,12 @@ def receive_telemetry(data: TelemetryData):
             "rssi": data.rssi,
             "alarm": alarm,
             "alarm_reason": alarm_reason,
+            "compressor_should_be_on": compressor_should_be_on,
             "timestamp": now_iso,
         }
 
         db.collection("device_telemetry").add(history_data)
+
     db.collection("device_status").document(data.device_id).set(
         {
             "device_id": data.device_id,
@@ -188,10 +236,14 @@ def receive_telemetry(data: TelemetryData):
             "humidity": data.humidity,
             "rssi": data.rssi,
             "online": True,
-            "last_seen_at": datetime.now().isoformat(),
+            "last_seen_at": now_iso,
             "updated_at": now_iso,
             "alarm": alarm,
             "alarm_reason": alarm_reason,
+            "compressor_should_be_on": compressor_should_be_on,
+            "compressor_last_off_at": compressor_last_off_at,
+            "compressor_can_turn_on": compressor_can_turn_on,
+            "compressor_wait_seconds_remaining": compressor_wait_seconds_remaining,
             "last_history_at": (
                 now_iso
                 if should_save_history
@@ -200,6 +252,7 @@ def receive_telemetry(data: TelemetryData):
         },
         merge=True,
     )
+
     return {"success": True, "message": "Telemetry received"}
 
 
@@ -405,6 +458,7 @@ def update_device_config(device_id: str, config: DeviceConfigUpdate):
         "differential": config.differential,
         "alarm_enabled": config.alarm_enabled,
         "compressor_control_enabled": config.compressor_control_enabled,
+        "compressor_min_off_seconds": config.compressor_min_off_seconds,
         "updated_at": datetime.now().isoformat(),
     }
 
@@ -471,3 +525,26 @@ def get_device_telemetry(device_id: str, limit: int = 50):
         readings.append(doc.to_dict())
 
     return {"success": True, "readings": readings}
+
+
+@app.get("/api/devices/{device_id}/control")
+def get_device_control(device_id: str):
+
+    status_doc = db.collection("device_status").document(device_id).get()
+
+    if not status_doc.exists:
+        return {"success": False, "message": "Device status not found"}
+
+    status = status_doc.to_dict()
+
+    return {
+        "success": True,
+        "device_id": device_id,
+        "compressor_should_be_on": status.get("compressor_should_be_on", False),
+        "compressor_can_turn_on": status.get("compressor_can_turn_on", True),
+        "compressor_wait_seconds_remaining": status.get(
+            "compressor_wait_seconds_remaining", 0
+        ),
+        "alarm": status.get("alarm", False),
+        "alarm_reason": status.get("alarm_reason"),
+    }
