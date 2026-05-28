@@ -37,6 +37,7 @@ devices_db: Dict[str, dict] = {}
 
 class TelemetryData(BaseModel):
     device_id: str
+    compressor_relay_on: bool | None = None
     temperature: float
     humidity: float
     rssi: int
@@ -133,6 +134,7 @@ def receive_telemetry(data: TelemetryData):
     print("NUEVA TELEMETRIA")
     print("==============================")
     print("Device:", data.device_id)
+    print("Compressor relay on:", data.compressor_relay_on)
     print("Temp:", data.temperature)
     print("Humidity:", data.humidity)
     print("RSSI:", data.rssi)
@@ -187,7 +189,7 @@ def receive_telemetry(data: TelemetryData):
         if setpoint is not None and differential is not None:
             turn_on_temp = setpoint + differential
 
-            if data.temperature >= turn_on_temp and compressor_can_turn_on:
+            if data.temperature >= turn_on_temp:
                 compressor_should_be_on = True
 
             elif data.temperature <= setpoint:
@@ -224,6 +226,7 @@ def receive_telemetry(data: TelemetryData):
             "alarm": alarm,
             "alarm_reason": alarm_reason,
             "compressor_should_be_on": compressor_should_be_on,
+            "compressor_relay_on": data.compressor_relay_on,
             "timestamp": now_iso,
         }
 
@@ -241,6 +244,7 @@ def receive_telemetry(data: TelemetryData):
             "alarm": alarm,
             "alarm_reason": alarm_reason,
             "compressor_should_be_on": compressor_should_be_on,
+            "compressor_relay_on": data.compressor_relay_on,
             "compressor_last_off_at": compressor_last_off_at,
             "compressor_can_turn_on": compressor_can_turn_on,
             "compressor_wait_seconds_remaining": compressor_wait_seconds_remaining,

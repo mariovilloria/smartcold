@@ -3,13 +3,20 @@
 #include <WiFiManager.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <Preferences.h>
 
 const bool BORRAR_WIFI_AL_INICIAR = false;
 
+const String DEVICE_ID = "SmartCold-5494";
+const String API_BASE_URL = "http://192.168.18.8:8000";
+
+bool compressorRelayOn = false;
+
 WiFiManager wifiManager;
+Preferences preferences;
+
 void enviarTelemetria()
 {
-
   if (WiFi.status() != WL_CONNECTED)
   {
     Serial.println("❌ WIFI NO CONECTADO");
@@ -17,23 +24,21 @@ void enviarTelemetria()
   }
 
   HTTPClient http;
-
-  String url = "http://192.168.18.8:8000/api/telemetry";
+  String url = API_BASE_URL + "/api/telemetry";
 
   http.begin(url);
-
   http.addHeader("Content-Type", "application/json");
 
   JsonDocument doc;
 
-  doc["device_id"] = "SmartCold-5494";
-  doc["temperature"] = 7;
+  doc["device_id"] = DEVICE_ID;
+  doc["temperature"] = 3;
   doc["humidity"] = 65;
   doc["rssi"] = WiFi.RSSI();
   doc["online"] = true;
+  doc["compressor_relay_on"] = compressorRelayOn;
 
   String body;
-
   serializeJson(doc, body);
 
   Serial.println();
@@ -41,21 +46,96 @@ void enviarTelemetria()
   Serial.println(body);
 
   int httpCode = http.POST(body);
+
   if (httpCode <= 0)
   {
     Serial.print("ERROR HTTP: ");
     Serial.println(http.errorToString(httpCode));
+    http.end();
+    return;
   }
+
   Serial.print("HTTP CODE: ");
   Serial.println(httpCode);
 
   String response = http.getString();
 
-  Serial.println("RESPUESTA:");
+  Serial.println("RESPUESTA TELEMETRIA:");
   Serial.println(response);
 
   http.end();
 }
+
+void consultarControlCompresor()
+{
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.println("❌ WIFI NO CONECTADO");
+    return;
+  }
+
+  HTTPClient http;
+  String url = API_BASE_URL + "/api/devices/" + DEVICE_ID + "/control";
+
+  http.begin(url);
+
+  Serial.println();
+  Serial.println("🧠 CONSULTANDO CONTROL COMPRESOR...");
+  Serial.println(url);
+
+  int httpCode = http.GET();
+
+  if (httpCode <= 0)
+  {
+    Serial.print("ERROR HTTP CONTROL: ");
+    Serial.println(http.errorToString(httpCode));
+    http.end();
+    return;
+  }
+
+  Serial.print("HTTP CONTROL CODE: ");
+  Serial.println(httpCode);
+
+  String response = http.getString();
+
+  Serial.println("RESPUESTA CONTROL:");
+  Serial.println(response);
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, response);
+
+  if (error)
+  {
+    Serial.print("❌ ERROR JSON CONTROL: ");
+    Serial.println(error.c_str());
+    http.end();
+    return;
+  }
+
+  bool compressorShouldBeOn = doc["compressor_should_be_on"] | false;
+  bool compressorCanTurnOn = doc["compressor_can_turn_on"] | false;
+  int waitSecondsRemaining = doc["compressor_wait_seconds_remaining"] | 0;
+  compressorRelayOn = compressorShouldBeOn && compressorCanTurnOn;
+  preferences.putBool("relay_on", compressorRelayOn);
+  Serial.println();
+  Serial.println("====== ESTADO CONTROL ======");
+  Serial.print("Compresor debe encender: ");
+  Serial.println(compressorShouldBeOn ? "SI" : "NO");
+
+  Serial.print("Puede encender ahora: ");
+  Serial.println(compressorCanTurnOn ? "SI" : "NO");
+
+  Serial.print("Espera restante: ");
+  Serial.print(waitSecondsRemaining);
+  Serial.println(" segundos");
+  Serial.println("============================");
+
+  Serial.print("Relay compresor: ");
+  Serial.println(compressorRelayOn ? "ON" : "OFF");
+
+  http.end();
+}
+
 void setup()
 {
   Serial.begin(115200);
@@ -65,6 +145,12 @@ void setup()
   Serial.println("==========================");
   Serial.println("SMARTCOLD INICIANDO");
   Serial.println("==========================");
+  preferences.begin("smartcold", false);
+
+  compressorRelayOn = preferences.getBool("relay_on", false);
+
+  Serial.print("Estado relay guardado: ");
+  Serial.println(compressorRelayOn ? "ON" : "OFF");
 
   if (BORRAR_WIFI_AL_INICIAR)
   {
@@ -82,6 +168,7 @@ void setup()
 
   wifiManager.setConnectTimeout(30);
   wifiManager.setConfigPortalTimeout(180);
+
   bool conectado = wifiManager.autoConnect(nombreAP.c_str());
 
   if (!conectado)
@@ -98,10 +185,15 @@ void setup()
   Serial.println(WiFi.localIP());
   Serial.print("RSSI: ");
   Serial.println(WiFi.RSSI());
+
   enviarTelemetria();
+  consultarControlCompresor();
 }
 
 void loop()
 {
-  delay(1000);
+  consultarControlCompresor();
+  enviarTelemetria();
+
+  delay(10000);
 }
