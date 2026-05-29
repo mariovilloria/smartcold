@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
 from datetime import datetime, timedelta
-from typing import Dict
+from typing import Dict, List, Optional
 import firebase_admin
 from firebase_admin import credentials, firestore
 
@@ -97,14 +97,33 @@ class DeviceCreate(BaseModel):
 # =====================================
 
 
-class DeviceConfigUpdate(BaseModel):
-    temp_min_alarm: float
-    temp_max_alarm: float
-    setpoint: float
-    differential: float
+class SensorConfig(BaseModel):
+    id: str
+    role: str
+    name: str
+    type: str
+    bus: str
+    pin: Optional[int] = None
+    address: Optional[str] = None
+    enabled: bool = True
+    offset: float = 0
     alarm_enabled: bool = True
-    compressor_control_enabled: bool = False
-    compressor_min_off_seconds: int = 180
+    temp_min_alarm: Optional[float] = None
+    temp_max_alarm: Optional[float] = None
+    can_stop_compressor: bool = False
+
+
+class CompressorConfig(BaseModel):
+    enabled: bool = True
+    control_sensor_role: str = "chamber"
+    setpoint: float = 4
+    differential: float = 2
+    min_off_seconds: int = 180
+
+
+class DeviceConfigUpdate(BaseModel):
+    compressor: CompressorConfig
+    sensors: List[SensorConfig]
 
 
 # =====================================
@@ -454,17 +473,9 @@ def get_device_status(device_id: str):
 @app.post("/api/devices/{device_id}/config")
 def update_device_config(device_id: str, config: DeviceConfigUpdate):
 
-    config_data = {
-        "device_id": device_id,
-        "temp_min_alarm": config.temp_min_alarm,
-        "temp_max_alarm": config.temp_max_alarm,
-        "setpoint": config.setpoint,
-        "differential": config.differential,
-        "alarm_enabled": config.alarm_enabled,
-        "compressor_control_enabled": config.compressor_control_enabled,
-        "compressor_min_off_seconds": config.compressor_min_off_seconds,
-        "updated_at": datetime.now().isoformat(),
-    }
+    config_data = config.model_dump()
+    config_data["device_id"] = device_id
+    config_data["updated_at"] = datetime.now().isoformat()
 
     db.collection("device_config").document(device_id).set(config_data, merge=True)
 
@@ -474,6 +485,86 @@ def update_device_config(device_id: str, config: DeviceConfigUpdate):
     print(config_data)
 
     return {"success": True, "config": config_data}
+
+
+@app.get("/api/devices/{device_id}/config")
+def get_device_config(device_id: str):
+
+    doc = db.collection("device_config").document(device_id).get()
+
+    if not doc.exists:
+        default_config = {
+            "device_id": device_id,
+            "compressor": {
+                "enabled": True,
+                "control_sensor_role": "chamber",
+                "setpoint": 4,
+                "differential": 2,
+                "min_off_seconds": 180,
+                "force_off_on_sensor_error": True,
+            },
+            "sensors": [
+                {
+                    "id": "chamber_1",
+                    "role": "chamber",
+                    "name": "Sonda cámara",
+                    "type": "ds18b20",
+                    "bus": "onewire",
+                    "pin": 4,
+                    "address": "",
+                    "enabled": True,
+                    "offset": 0,
+                    "alarm_enabled": True,
+                    "temp_min_alarm": 0,
+                    "temp_max_alarm": 8,
+                    "can_stop_compressor": True,
+                }
+            ],
+            "outputs": {
+                "compressor": {
+                    "enabled": True,
+                    "pin": 26,
+                    "active_level": "HIGH",
+                    "name": "Salida compresor",
+                },
+                "defrost": {
+                    "enabled": False,
+                    "pin": 27,
+                    "active_level": "HIGH",
+                    "name": "Salida defrost",
+                },
+                "fan": {
+                    "enabled": False,
+                    "pin": 25,
+                    "active_level": "HIGH",
+                    "name": "Salida ventilador",
+                },
+                "alarm": {
+                    "enabled": False,
+                    "pin": 14,
+                    "active_level": "HIGH",
+                    "name": "Salida alarma",
+                },
+            },
+            "defrost": {
+                "enabled": False,
+                "mode": "time",
+                "interval_minutes": 360,
+                "duration_minutes": 20,
+                "end_sensor_role": "evaporator",
+                "end_temperature": 8,
+            },
+            "safety": {
+                "offline_mode": "local_control",
+                "sensor_error_action": "compressor_off",
+                "max_compressor_runtime_minutes": 0,
+            },
+            "updated_at": datetime.now().isoformat(),
+        }
+
+        return {"success": True, "config": default_config}
+
+    return {"success": True, "config": doc.to_dict()}
 
 
 @app.get("/api/devices/{device_id}/dashboard")
