@@ -4,13 +4,20 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
 const bool BORRAR_WIFI_AL_INICIAR = false;
 
 const String DEVICE_ID = "SmartCold-5494";
 const String API_BASE_URL = "http://192.168.18.8:8000";
 
-const bool MODO_PRUEBA_TEMPERATURA = true;
+const int PIN_ONEWIRE = 4;
+
+OneWire oneWire(PIN_ONEWIRE);
+DallasTemperature sensoresDS18B20(&oneWire);
+
+const bool MODO_PRUEBA_TEMPERATURA = false;
 unsigned long ultimoCambioTemperaturaPrueba = 0;
 
 bool compressorRelayOn = false;
@@ -19,6 +26,7 @@ float configDifferential = 2.0;
 int configMinOffSeconds = 180;
 String configUpdatedAt = "";
 float temperaturaActual = 7.0;
+const String SENSOR_CAMARA_ADDRESS = "285150C0000000AB";
 
 bool compressorShouldBeOn = false;
 bool compressorCanTurnOn = true;
@@ -350,6 +358,106 @@ void consultarControlCompresor()
   http.end();
 }
 
+void imprimirDireccionSensor(DeviceAddress direccion)
+{
+  for (uint8_t i = 0; i < 8; i++)
+  {
+    if (direccion[i] < 16)
+    {
+      Serial.print("0");
+    }
+
+    Serial.print(direccion[i], HEX);
+  }
+}
+
+void detectarSensoresDS18B20()
+{
+  sensoresDS18B20.begin();
+
+  int cantidadSensores = sensoresDS18B20.getDeviceCount();
+
+  Serial.println();
+  Serial.println("🌡️ DETECTANDO SENSORES DS18B20...");
+  Serial.print("Sensores encontrados: ");
+  Serial.println(cantidadSensores);
+
+  DeviceAddress direccion;
+
+  for (int i = 0; i < cantidadSensores; i++)
+  {
+    if (sensoresDS18B20.getAddress(direccion, i))
+    {
+      Serial.print("Sensor ");
+      Serial.print(i + 1);
+      Serial.print(" direccion: ");
+      imprimirDireccionSensor(direccion);
+      Serial.println();
+    }
+    else
+    {
+      Serial.print("No se pudo leer direccion del sensor ");
+      Serial.println(i + 1);
+    }
+  }
+}
+
+String direccionSensorToString(DeviceAddress direccion)
+{
+  String resultado = "";
+
+  for (uint8_t i = 0; i < 8; i++)
+  {
+    if (direccion[i] < 16)
+    {
+      resultado += "0";
+    }
+
+    resultado += String(direccion[i], HEX);
+  }
+
+  resultado.toUpperCase();
+  return resultado;
+}
+
+void leerTemperaturasDS18B20()
+{
+  sensoresDS18B20.requestTemperatures();
+
+  int cantidadSensores = sensoresDS18B20.getDeviceCount();
+
+  Serial.println();
+  Serial.println("🌡️ LECTURA TEMPERATURAS DS18B20");
+
+  DeviceAddress direccion;
+
+  for (int i = 0; i < cantidadSensores; i++)
+  {
+    if (sensoresDS18B20.getAddress(direccion, i))
+    {
+      float tempC = sensoresDS18B20.getTempC(direccion);
+
+      Serial.print("Sensor ");
+      Serial.print(i + 1);
+      Serial.print(" ");
+      imprimirDireccionSensor(direccion);
+      Serial.print(" = ");
+      Serial.print(tempC);
+      Serial.println(" °C");
+      String direccionTexto = direccionSensorToString(direccion);
+
+      if (direccionTexto == SENSOR_CAMARA_ADDRESS && tempC != DEVICE_DISCONNECTED_C)
+      {
+        temperaturaActual = tempC;
+
+        Serial.print("✅ Temperatura de cámara actualizada: ");
+        Serial.print(temperaturaActual);
+        Serial.println(" °C");
+      }
+    }
+  }
+}
+
 void setup()
 {
   Serial.begin(115200);
@@ -359,6 +467,8 @@ void setup()
   Serial.println("==========================");
   Serial.println("SMARTCOLD INICIANDO");
   Serial.println("==========================");
+  detectarSensoresDS18B20();
+
   preferences.begin("smartcold", false);
 
   compressorRelayOn = preferences.getBool("relay_on", false);
@@ -424,6 +534,7 @@ void setup()
 
 void loop()
 {
+  leerTemperaturasDS18B20();
   actualizarTemperaturaPrueba();
   calcularControlCompresorLocal();
   enviarTelemetria();
