@@ -10,12 +10,23 @@ const bool BORRAR_WIFI_AL_INICIAR = false;
 const String DEVICE_ID = "SmartCold-5494";
 const String API_BASE_URL = "http://192.168.18.8:8000";
 
+const bool MODO_PRUEBA_TEMPERATURA = true;
+unsigned long ultimoCambioTemperaturaPrueba = 0;
+
 bool compressorRelayOn = false;
 float configSetpoint = 4.0;
 float configDifferential = 2.0;
 int configMinOffSeconds = 180;
 String configUpdatedAt = "";
+float temperaturaActual = 7.0;
 
+bool compressorShouldBeOn = false;
+bool compressorCanTurnOn = true;
+int localProtectionWaitSecondsRemaining = 0;
+
+unsigned long compressorLastOffMillis = 0;
+bool localProtectionActive = false;
+unsigned long localProtectionStartMillis = 0;
 WiFiManager wifiManager;
 Preferences preferences;
 
@@ -36,11 +47,14 @@ void enviarTelemetria()
   JsonDocument doc;
 
   doc["device_id"] = DEVICE_ID;
-  doc["temperature"] = 3;
+  doc["temperature"] = temperaturaActual;
   doc["humidity"] = 65;
   doc["rssi"] = WiFi.RSSI();
   doc["online"] = true;
   doc["compressor_relay_on"] = compressorRelayOn;
+  doc["compressor_should_be_on"] = compressorShouldBeOn;
+  doc["compressor_can_turn_on"] = compressorCanTurnOn;
+  doc["compressor_wait_seconds_remaining"] = localProtectionWaitSecondsRemaining;
 
   String body;
   serializeJson(doc, body);
@@ -152,6 +166,120 @@ void descargarConfiguracion()
 
   http.end();
 }
+void calcularControlCompresorLocal()
+{
+  bool estadoAnterior = compressorRelayOn;
+
+  float temperaturaEncendido = configSetpoint + configDifferential;
+
+  if (temperaturaActual >= temperaturaEncendido)
+  {
+    compressorShouldBeOn = true;
+  }
+  else if (temperaturaActual <= configSetpoint)
+  {
+    compressorShouldBeOn = false;
+  }
+
+  compressorCanTurnOn = true;
+
+  localProtectionWaitSecondsRemaining = 0;
+
+  if (localProtectionActive)
+  {
+    unsigned long tiempoApagado = millis() - localProtectionStartMillis;
+    unsigned long tiempoProteccion = (unsigned long)configMinOffSeconds * 1000;
+
+    if (tiempoApagado < tiempoProteccion)
+    {
+      compressorCanTurnOn = false;
+
+      unsigned long restanteMs = tiempoProteccion - tiempoApagado;
+      localProtectionWaitSecondsRemaining = (restanteMs + 999) / 1000;
+    }
+    else
+    {
+      localProtectionActive = false;
+      localProtectionWaitSecondsRemaining = 0;
+      preferences.putBool("prot_active", false);
+
+      Serial.println("✅ Proteccion local finalizada.");
+    }
+  }
+
+  compressorRelayOn = compressorShouldBeOn && compressorCanTurnOn;
+
+  if (estadoAnterior && !compressorRelayOn)
+  {
+    compressorLastOffMillis = millis();
+    localProtectionActive = true;
+    localProtectionStartMillis = millis();
+
+    preferences.putBool("prot_active", true);
+
+    compressorCanTurnOn = false;
+    localProtectionWaitSecondsRemaining = configMinOffSeconds;
+
+    Serial.println("⚠️ Compresor apagado. Proteccion local iniciada.");
+  }
+
+  preferences.putBool("relay_on", compressorRelayOn);
+
+  Serial.println();
+  Serial.println("====== CONTROL LOCAL COMPRESOR ======");
+  Serial.print("Temperatura actual: ");
+  Serial.println(temperaturaActual);
+
+  Serial.print("Setpoint: ");
+  Serial.println(configSetpoint);
+
+  Serial.print("Diferencial: ");
+  Serial.println(configDifferential);
+
+  Serial.print("Temperatura encendido: ");
+  Serial.println(temperaturaEncendido);
+
+  Serial.print("Debe encender: ");
+  Serial.println(compressorShouldBeOn ? "SI" : "NO");
+
+  Serial.print("Puede encender: ");
+  Serial.println(compressorCanTurnOn ? "SI" : "NO");
+
+  Serial.print("Espera proteccion: ");
+  Serial.print(localProtectionWaitSecondsRemaining);
+  Serial.println(" segundos");
+
+  Serial.print("Relay compresor: ");
+  Serial.println(compressorRelayOn ? "ON" : "OFF");
+  Serial.println("=====================================");
+}
+void actualizarTemperaturaPrueba()
+{
+  if (!MODO_PRUEBA_TEMPERATURA)
+  {
+    return;
+  }
+
+  if (millis() - ultimoCambioTemperaturaPrueba >= 30000)
+  {
+    ultimoCambioTemperaturaPrueba = millis();
+
+    if (temperaturaActual >= 6.0)
+    {
+      temperaturaActual = 3.0;
+    }
+    else
+    {
+      temperaturaActual = 7.0;
+    }
+
+    Serial.println();
+    Serial.println("🧪 MODO PRUEBA TEMPERATURA");
+    Serial.print("Nueva temperatura simulada: ");
+    Serial.println(temperaturaActual);
+  }
+}
+
 void consultarControlCompresor()
 {
   if (WiFi.status() != WL_CONNECTED)
@@ -234,6 +362,11 @@ void setup()
   preferences.begin("smartcold", false);
 
   compressorRelayOn = preferences.getBool("relay_on", false);
+  localProtectionActive = true;
+  localProtectionStartMillis = millis();
+  preferences.putBool("prot_active", true);
+
+  Serial.println("⚠️ Proteccion local iniciada por arranque/reinicio.");
 
   configSetpoint = preferences.getFloat("setpoint", 4.0);
   configDifferential = preferences.getFloat("diff", 2.0);
@@ -291,6 +424,8 @@ void setup()
 
 void loop()
 {
+  actualizarTemperaturaPrueba();
+  calcularControlCompresorLocal();
   enviarTelemetria();
 
   delay(10000);
