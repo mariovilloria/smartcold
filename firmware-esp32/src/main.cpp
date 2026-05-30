@@ -17,6 +17,10 @@ const int PIN_ONEWIRE = 4;
 OneWire oneWire(PIN_ONEWIRE);
 DallasTemperature sensoresDS18B20(&oneWire);
 
+const int MAX_SENSORES_DS18B20 = 8;
+String sensoresDetectados[MAX_SENSORES_DS18B20];
+int cantidadSensoresDetectados = 0;
+
 const bool MODO_PRUEBA_TEMPERATURA = false;
 unsigned long ultimoCambioTemperaturaPrueba = 0;
 
@@ -26,7 +30,7 @@ float configDifferential = 2.0;
 int configMinOffSeconds = 180;
 String configUpdatedAt = "";
 float temperaturaActual = 7.0;
-const String SENSOR_CAMARA_ADDRESS = "285150C0000000AB";
+String sensorCamaraAddress = "285150C0000000AB";
 
 bool compressorShouldBeOn = false;
 bool compressorCanTurnOn = true;
@@ -63,6 +67,12 @@ void enviarTelemetria()
   doc["compressor_should_be_on"] = compressorShouldBeOn;
   doc["compressor_can_turn_on"] = compressorCanTurnOn;
   doc["compressor_wait_seconds_remaining"] = localProtectionWaitSecondsRemaining;
+  JsonArray detectedSensors = doc["detected_sensors"].to<JsonArray>();
+
+  for (int i = 0; i < cantidadSensoresDetectados; i++)
+  {
+    detectedSensors.add(sensoresDetectados[i]);
+  }
 
   String body;
   serializeJson(doc, body);
@@ -425,6 +435,7 @@ void leerTemperaturasDS18B20()
   sensoresDS18B20.requestTemperatures();
 
   int cantidadSensores = sensoresDS18B20.getDeviceCount();
+  cantidadSensoresDetectados = 0;
 
   Serial.println();
   Serial.println("🌡️ LECTURA TEMPERATURAS DS18B20");
@@ -445,8 +456,13 @@ void leerTemperaturasDS18B20()
       Serial.print(tempC);
       Serial.println(" °C");
       String direccionTexto = direccionSensorToString(direccion);
+      if (cantidadSensoresDetectados < MAX_SENSORES_DS18B20)
+      {
+        sensoresDetectados[cantidadSensoresDetectados] = direccionTexto;
+        cantidadSensoresDetectados++;
+      }
 
-      if (direccionTexto == SENSOR_CAMARA_ADDRESS && tempC != DEVICE_DISCONNECTED_C)
+      if (direccionTexto == sensorCamaraAddress && tempC != DEVICE_DISCONNECTED_C)
       {
         temperaturaActual = tempC;
 
@@ -482,6 +498,10 @@ void setup()
   configDifferential = preferences.getFloat("diff", 2.0);
   configMinOffSeconds = preferences.getInt("min_off", 180);
   configUpdatedAt = preferences.getString("cfg_time", "");
+  sensorCamaraAddress = preferences.getString("cam_addr", sensorCamaraAddress);
+
+  Serial.print("Sensor camara configurado: ");
+  Serial.println(sensorCamaraAddress);
 
   Serial.println("Configuracion local cargada:");
   Serial.print("Setpoint: ");

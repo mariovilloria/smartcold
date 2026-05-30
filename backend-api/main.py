@@ -38,10 +38,14 @@ devices_db: Dict[str, dict] = {}
 class TelemetryData(BaseModel):
     device_id: str
     compressor_relay_on: bool | None = None
+    compressor_should_be_on: bool | None = None
+    compressor_can_turn_on: bool | None = None
+    compressor_wait_seconds_remaining: int | None = None
     temperature: float
     humidity: float
     rssi: int
     online: bool
+    detected_sensors: list[str] = []
 
 
 # =====================================
@@ -153,18 +157,19 @@ def receive_telemetry(data: TelemetryData):
     print("NUEVA TELEMETRIA")
     print("==============================")
     print("Device:", data.device_id)
-    print("Compressor relay on:", data.compressor_relay_on)
     print("Temp:", data.temperature)
     print("Humidity:", data.humidity)
     print("RSSI:", data.rssi)
     print("Online:", data.online)
+    print("Compressor relay on:", data.compressor_relay_on)
+    print("Compressor should be on:", data.compressor_should_be_on)
+    print("Compressor can turn on:", data.compressor_can_turn_on)
+    print("Wait seconds:", data.compressor_wait_seconds_remaining)
+    print("Detected sensors:", data.detected_sensors)
     print("Timestamp:", datetime.now())
 
     now = datetime.now()
     now_iso = now.isoformat()
-
-    config_doc = db.collection("device_config").document(data.device_id).get()
-    config = config_doc.to_dict() if config_doc.exists else {}
 
     status_doc = db.collection("device_status").document(data.device_id).get()
     current_status = status_doc.to_dict() if status_doc.exists else {}
@@ -172,59 +177,7 @@ def receive_telemetry(data: TelemetryData):
     alarm = False
     alarm_reason = None
 
-    if config.get("alarm_enabled", False):
-        temp_min = config.get("temp_min_alarm")
-        temp_max = config.get("temp_max_alarm")
-
-        if temp_min is not None and data.temperature < temp_min:
-            alarm = True
-            alarm_reason = "TEMP_LOW"
-
-        if temp_max is not None and data.temperature > temp_max:
-            alarm = True
-            alarm_reason = "TEMP_HIGH"
-
-    previous_compressor_state = current_status.get("compressor_should_be_on", False)
-
-    compressor_should_be_on = previous_compressor_state
-    compressor_last_off_at = current_status.get("compressor_last_off_at")
-    compressor_can_turn_on = True
-    compressor_wait_seconds_remaining = 0
-
-    if compressor_last_off_at:
-        last_off_dt = datetime.fromisoformat(compressor_last_off_at)
-        seconds_since_last_off = int((now - last_off_dt).total_seconds())
-
-        min_off_seconds = config.get("compressor_min_off_seconds", 180)
-
-        if seconds_since_last_off < min_off_seconds:
-            compressor_can_turn_on = False
-            compressor_wait_seconds_remaining = min_off_seconds - seconds_since_last_off
-
-    if config.get("compressor_control_enabled", False):
-        setpoint = config.get("setpoint")
-        differential = config.get("differential")
-
-        if setpoint is not None and differential is not None:
-            turn_on_temp = setpoint + differential
-
-            if data.temperature >= turn_on_temp:
-                compressor_should_be_on = True
-
-            elif data.temperature <= setpoint:
-                compressor_should_be_on = False
-    else:
-        compressor_should_be_on = False
-
-    compressor_turned_off_now = (
-        previous_compressor_state is True and compressor_should_be_on is False
-    )
-
-    if compressor_turned_off_now:
-        compressor_last_off_at = now_iso
-
     should_save_history = False
-
     last_history_at = current_status.get("last_history_at")
 
     if not last_history_at:
@@ -236,43 +189,36 @@ def receive_telemetry(data: TelemetryData):
         if seconds_since_last_history >= HISTORY_INTERVAL_SECONDS:
             should_save_history = True
 
-    if should_save_history:
-        history_data = {
-            "device_id": data.device_id,
-            "temperature": data.temperature,
-            "humidity": data.humidity,
-            "rssi": data.rssi,
-            "alarm": alarm,
-            "alarm_reason": alarm_reason,
-            "compressor_should_be_on": compressor_should_be_on,
-            "compressor_relay_on": data.compressor_relay_on,
-            "timestamp": now_iso,
-        }
+    telemetry_data = {
+        "device_id": data.device_id,
+        "temperature": data.temperature,
+        "humidity": data.humidity,
+        "rssi": data.rssi,
+        "online": data.online,
+        "alarm": alarm,
+        "alarm_reason": alarm_reason,
+        "compressor_relay_on": data.compressor_relay_on,
+        "compressor_should_be_on": data.compressor_should_be_on,
+        "compressor_can_turn_on": data.compressor_can_turn_on,
+        "compressor_wait_seconds_remaining": data.compressor_wait_seconds_remaining,
+        "detected_sensors": data.detected_sensors,
+        "timestamp": now_iso,
+    }
 
-        db.collection("device_telemetry").add(history_data)
+    if should_save_history:
+        db.collection("device_telemetry").add(telemetry_data)
+
+    status_data = {
+        **telemetry_data,
+        "last_seen_at": now_iso,
+        "updated_at": now_iso,
+        "last_history_at": (
+            now_iso if should_save_history else current_status.get("last_history_at")
+        ),
+    }
 
     db.collection("device_status").document(data.device_id).set(
-        {
-            "device_id": data.device_id,
-            "temperature": data.temperature,
-            "humidity": data.humidity,
-            "rssi": data.rssi,
-            "online": True,
-            "last_seen_at": now_iso,
-            "updated_at": now_iso,
-            "alarm": alarm,
-            "alarm_reason": alarm_reason,
-            "compressor_should_be_on": compressor_should_be_on,
-            "compressor_relay_on": data.compressor_relay_on,
-            "compressor_last_off_at": compressor_last_off_at,
-            "compressor_can_turn_on": compressor_can_turn_on,
-            "compressor_wait_seconds_remaining": compressor_wait_seconds_remaining,
-            "last_history_at": (
-                now_iso
-                if should_save_history
-                else current_status.get("last_history_at")
-            ),
-        },
+        status_data,
         merge=True,
     )
 
