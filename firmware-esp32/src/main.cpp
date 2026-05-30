@@ -151,26 +151,45 @@ void descargarConfiguracion()
 
   String remoteUpdatedAt = config["updated_at"] | "";
 
-  if (remoteUpdatedAt == configUpdatedAt)
+  float newSetpoint = config["setpoint"] | configSetpoint;
+  float newDifferential = config["differential"] | configDifferential;
+  int newMinOffSeconds = config["compressor_min_off_seconds"] | configMinOffSeconds;
+
+  String newSensorCamaraAddress = sensorCamaraAddress;
+
+  if (config["sensor_roles"].is<JsonObject>())
+  {
+    JsonObject sensorRoles = config["sensor_roles"];
+    newSensorCamaraAddress = sensorRoles["camara"] | sensorCamaraAddress;
+  }
+
+  bool camAddrNoGuardado = !preferences.isKey("cam_addr");
+
+  bool configChanged = (camAddrNoGuardado ||
+                        remoteUpdatedAt != configUpdatedAt ||
+                        newSetpoint != configSetpoint ||
+                        newDifferential != configDifferential ||
+                        newMinOffSeconds != configMinOffSeconds ||
+                        newSensorCamaraAddress != sensorCamaraAddress);
+
+  if (!configChanged)
   {
     Serial.println("Configuracion sin cambios. No se guarda en memoria.");
     http.end();
     return;
   }
 
-  float newSetpoint = config["setpoint"] | configSetpoint;
-  float newDifferential = config["differential"] | configDifferential;
-  int newMinOffSeconds = config["compressor_min_off_seconds"] | configMinOffSeconds;
-
   configSetpoint = newSetpoint;
   configDifferential = newDifferential;
   configMinOffSeconds = newMinOffSeconds;
   configUpdatedAt = remoteUpdatedAt;
+  sensorCamaraAddress = newSensorCamaraAddress;
 
   preferences.putFloat("setpoint", configSetpoint);
   preferences.putFloat("diff", configDifferential);
   preferences.putInt("min_off", configMinOffSeconds);
   preferences.putString("cfg_time", configUpdatedAt);
+  preferences.putString("cam_addr", sensorCamaraAddress);
 
   Serial.println("✅ Configuracion guardada en memoria local:");
   Serial.print("Setpoint: ");
@@ -179,6 +198,8 @@ void descargarConfiguracion()
   Serial.println(configDifferential);
   Serial.print("Min off seconds: ");
   Serial.println(configMinOffSeconds);
+  Serial.print("Sensor camara: ");
+  Serial.println(sensorCamaraAddress);
   Serial.print("Updated at: ");
   Serial.println(configUpdatedAt);
 
