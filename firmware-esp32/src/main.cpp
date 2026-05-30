@@ -10,6 +10,7 @@
 const bool BORRAR_WIFI_AL_INICIAR = false;
 unsigned long ultimoIntentoConfig = 0;
 const unsigned long INTERVALO_CONFIG_MS = 60000;
+// const unsigned long INTERVALO_CONFIG_MS = 15UL * 60UL * 1000UL;
 
 const String DEVICE_ID = "SmartCold-5494";
 const String API_BASE_URL = "http://192.168.18.8:8000";
@@ -23,6 +24,26 @@ const int MAX_SENSORES_DS18B20 = 8;
 String sensoresDetectados[MAX_SENSORES_DS18B20];
 int cantidadSensoresDetectados = 0;
 
+const int MAX_SENSORES_CONFIGURADOS = 8;
+
+struct SensorConfigurado
+{
+  String role;
+  String address;
+  float temperature;
+  bool hasReading;
+
+  bool alarmEnabled;
+  float tempMinAlarm;
+  float tempMaxAlarm;
+  bool inAlarm;
+  bool previousAlarmState;
+  String alarmReason;
+};
+
+SensorConfigurado sensoresConfigurados[MAX_SENSORES_CONFIGURADOS];
+int cantidadSensoresConfigurados = 0;
+
 const bool MODO_PRUEBA_TEMPERATURA = false;
 unsigned long ultimoCambioTemperaturaPrueba = 0;
 
@@ -30,6 +51,7 @@ bool compressorRelayOn = false;
 float configSetpoint = 4.0;
 float configDifferential = 2.0;
 int configMinOffSeconds = 180;
+String configControlSensorRole = "chamber";
 String configUpdatedAt = "";
 float temperaturaActual = 7.0;
 float temperaturaEvaporador = NAN;
@@ -80,11 +102,18 @@ void enviarTelemetria()
   }
 
   JsonObject sensorReadings = doc["sensor_readings"].to<JsonObject>();
-  sensorReadings["chamber"] = temperaturaActual;
+  JsonObject sensorAlarms = doc["sensor_alarms"].to<JsonObject>();
 
-  if (!isnan(temperaturaEvaporador))
+  for (int i = 0; i < cantidadSensoresConfigurados; i++)
   {
-    sensorReadings["evaporator"] = temperaturaEvaporador;
+    if (sensoresConfigurados[i].hasReading)
+    {
+      sensorReadings[sensoresConfigurados[i].role] = sensoresConfigurados[i].temperature;
+
+      JsonObject alarmData = sensorAlarms[sensoresConfigurados[i].role].to<JsonObject>();
+      alarmData["in_alarm"] = sensoresConfigurados[i].inAlarm;
+      alarmData["reason"] = sensoresConfigurados[i].alarmReason;
+    }
   }
 
   String body;
@@ -167,6 +196,7 @@ void descargarConfiguracion()
   float newSetpoint = configSetpoint;
   float newDifferential = configDifferential;
   int newMinOffSeconds = configMinOffSeconds;
+  String newControlSensorRole = configControlSensorRole;
   String newSensorCamaraAddress = sensorCamaraAddress;
   String newSensorEvaporadorAddress = sensorEvaporadorAddress;
 
@@ -177,6 +207,8 @@ void descargarConfiguracion()
     newSetpoint = compressor["setpoint"] | configSetpoint;
     newDifferential = compressor["differential"] | configDifferential;
     newMinOffSeconds = compressor["min_off_seconds"] | configMinOffSeconds;
+    newControlSensorRole = compressor["control_sensor_role"] | configControlSensorRole;
+    newControlSensorRole.toLowerCase();
   }
   else
   {
@@ -188,7 +220,7 @@ void descargarConfiguracion()
   if (config["sensors"].is<JsonArray>())
   {
     JsonArray sensors = config["sensors"];
-
+    cantidadSensoresConfigurados = 0;
     for (JsonObject sensor : sensors)
     {
       String role = sensor["role"] | "";
@@ -197,7 +229,22 @@ void descargarConfiguracion()
 
       role.toLowerCase();
       address.toUpperCase();
+      if (enabled && role.length() > 0 && address.length() > 0 && cantidadSensoresConfigurados < MAX_SENSORES_CONFIGURADOS)
+      {
+        sensoresConfigurados[cantidadSensoresConfigurados].role = role;
+        sensoresConfigurados[cantidadSensoresConfigurados].address = address;
+        sensoresConfigurados[cantidadSensoresConfigurados].temperature = NAN;
+        sensoresConfigurados[cantidadSensoresConfigurados].hasReading = false;
 
+        sensoresConfigurados[cantidadSensoresConfigurados].alarmEnabled = sensor["alarm_enabled"] | false;
+        sensoresConfigurados[cantidadSensoresConfigurados].tempMinAlarm = sensor["temp_min_alarm"] | -100.0;
+        sensoresConfigurados[cantidadSensoresConfigurados].tempMaxAlarm = sensor["temp_max_alarm"] | 100.0;
+        sensoresConfigurados[cantidadSensoresConfigurados].inAlarm = false;
+        sensoresConfigurados[cantidadSensoresConfigurados].previousAlarmState = false;
+        sensoresConfigurados[cantidadSensoresConfigurados].alarmReason = "";
+
+        cantidadSensoresConfigurados++;
+      }
       if (enabled && address.length() > 0 && (role == "chamber" || role == "camara"))
       {
         newSensorCamaraAddress = address;
@@ -206,6 +253,30 @@ void descargarConfiguracion()
       {
         newSensorEvaporadorAddress = address;
       }
+    }
+
+    preferences.putInt("sensor_count", cantidadSensoresConfigurados);
+
+    for (int i = 0; i < cantidadSensoresConfigurados; i++)
+    {
+      String prefix = "s" + String(i) + "_";
+
+      preferences.putString((prefix + "role").c_str(), sensoresConfigurados[i].role);
+      preferences.putString((prefix + "addr").c_str(), sensoresConfigurados[i].address);
+      preferences.putBool((prefix + "alm_en").c_str(), sensoresConfigurados[i].alarmEnabled);
+      preferences.putFloat((prefix + "min").c_str(), sensoresConfigurados[i].tempMinAlarm);
+      preferences.putFloat((prefix + "max").c_str(), sensoresConfigurados[i].tempMaxAlarm);
+    }
+
+    Serial.print("Sensores configurados cargados: ");
+    Serial.println(cantidadSensoresConfigurados);
+
+    for (int i = 0; i < cantidadSensoresConfigurados; i++)
+    {
+      Serial.print("Role: ");
+      Serial.print(sensoresConfigurados[i].role);
+      Serial.print(" | Address: ");
+      Serial.println(sensoresConfigurados[i].address);
     }
   }
   else if (config["sensor_roles"].is<JsonObject>())
@@ -220,6 +291,7 @@ void descargarConfiguracion()
   bool configChanged = (camAddrNoGuardado ||
                         remoteUpdatedAt != configUpdatedAt ||
                         newSetpoint != configSetpoint ||
+                        newControlSensorRole != configControlSensorRole ||
                         newDifferential != configDifferential ||
                         newMinOffSeconds != configMinOffSeconds ||
                         newSensorCamaraAddress != sensorCamaraAddress ||
@@ -235,6 +307,7 @@ void descargarConfiguracion()
   configSetpoint = newSetpoint;
   configDifferential = newDifferential;
   configMinOffSeconds = newMinOffSeconds;
+  configControlSensorRole = newControlSensorRole;
   configUpdatedAt = remoteUpdatedAt;
   sensorCamaraAddress = newSensorCamaraAddress;
   sensorEvaporadorAddress = newSensorEvaporadorAddress;
@@ -242,6 +315,7 @@ void descargarConfiguracion()
   preferences.putFloat("setpoint", configSetpoint);
   preferences.putFloat("diff", configDifferential);
   preferences.putInt("min_off", configMinOffSeconds);
+  preferences.putString("ctrl_role", configControlSensorRole);
   preferences.putString("cfg_time", configUpdatedAt);
   preferences.putString("cam_addr", sensorCamaraAddress);
   preferences.putString("evap_addr", sensorEvaporadorAddress);
@@ -260,9 +334,90 @@ void descargarConfiguracion()
 
   http.end();
 }
+
+float obtenerTemperaturaPorRole(String role)
+{
+  role.toLowerCase();
+
+  for (int i = 0; i < cantidadSensoresConfigurados; i++)
+  {
+    if (sensoresConfigurados[i].role == role &&
+        sensoresConfigurados[i].hasReading)
+    {
+      return sensoresConfigurados[i].temperature;
+    }
+  }
+
+  return NAN;
+}
+
+void evaluarAlarmasSensores()
+{
+  for (int i = 0; i < cantidadSensoresConfigurados; i++)
+  {
+    SensorConfigurado &sensor = sensoresConfigurados[i];
+
+    bool estadoAnterior = sensor.previousAlarmState;
+
+    sensor.inAlarm = false;
+    sensor.alarmReason = "";
+
+    if (!sensor.alarmEnabled)
+      continue;
+
+    if (!sensor.hasReading)
+      continue;
+
+    if (sensor.temperature < sensor.tempMinAlarm)
+    {
+      sensor.inAlarm = true;
+      sensor.alarmReason = "LOW_TEMP";
+    }
+    else if (sensor.temperature > sensor.tempMaxAlarm)
+    {
+      sensor.inAlarm = true;
+      sensor.alarmReason = "HIGH_TEMP";
+    }
+
+    if (!estadoAnterior && sensor.inAlarm)
+    {
+      Serial.print("🚨 ALARMA ACTIVADA: ");
+      Serial.print(sensor.role);
+      Serial.print(" (");
+      Serial.print(sensor.alarmReason);
+      Serial.println(")");
+    }
+
+    if (estadoAnterior && !sensor.inAlarm)
+    {
+      Serial.print("✅ ALARMA RESTABLECIDA: ");
+      Serial.println(sensor.role);
+    }
+
+    sensor.previousAlarmState = sensor.inAlarm;
+  }
+}
+
 void calcularControlCompresorLocal()
 {
   bool estadoAnterior = compressorRelayOn;
+
+  float temperaturaControl = obtenerTemperaturaPorRole(configControlSensorRole);
+
+  if (isnan(temperaturaControl))
+  {
+    Serial.println("❌ No hay lectura valida del sensor de control. Compresor apagado por seguridad.");
+
+    compressorShouldBeOn = false;
+    compressorRelayOn = false;
+    compressorCanTurnOn = false;
+    localProtectionWaitSecondsRemaining = 0;
+
+    preferences.putBool("relay_on", false);
+    return;
+  }
+
+  temperaturaActual = temperaturaControl;
 
   float temperaturaEncendido = configSetpoint + configDifferential;
 
@@ -321,8 +476,11 @@ void calcularControlCompresorLocal()
 
   Serial.println();
   Serial.println("====== CONTROL LOCAL COMPRESOR ======");
-  Serial.print("Temperatura actual: ");
-  Serial.println(temperaturaActual);
+  Serial.print("Sensor control: ");
+  Serial.println(configControlSensorRole);
+
+  Serial.print("Temperatura control: ");
+  Serial.println(temperaturaControl);
 
   Serial.print("Setpoint: ");
   Serial.println(configSetpoint);
@@ -347,6 +505,7 @@ void calcularControlCompresorLocal()
   Serial.println(compressorRelayOn ? "ON" : "OFF");
   Serial.println("=====================================");
 }
+
 void actualizarTemperaturaPrueba()
 {
   if (!MODO_PRUEBA_TEMPERATURA)
@@ -540,25 +699,62 @@ void leerTemperaturasDS18B20()
         cantidadSensoresDetectados++;
       }
 
-      if (direccionTexto == sensorCamaraAddress && tempC != DEVICE_DISCONNECTED_C)
+      for (int j = 0; j < cantidadSensoresConfigurados; j++)
       {
-        temperaturaActual = tempC;
+        if (direccionTexto == sensoresConfigurados[j].address && tempC != DEVICE_DISCONNECTED_C)
+        {
+          sensoresConfigurados[j].temperature = tempC;
+          sensoresConfigurados[j].hasReading = true;
 
-        Serial.print("✅ Temperatura de cámara actualizada: ");
-        Serial.print(temperaturaActual);
-        Serial.println(" °C");
-      }
-
-      if (direccionTexto == sensorEvaporadorAddress && tempC != DEVICE_DISCONNECTED_C)
-      {
-        temperaturaEvaporador = tempC;
-
-        Serial.print("✅ Temperatura evaporador actualizada: ");
-        Serial.print(temperaturaEvaporador);
-        Serial.println(" °C");
+          Serial.print("✅ Sensor por rol actualizado: ");
+          Serial.print(sensoresConfigurados[j].role);
+          Serial.print(" = ");
+          Serial.print(tempC);
+          Serial.println(" °C");
+        }
       }
     }
   }
+}
+
+void cargarSensoresConfiguradosDesdeMemoria()
+{
+  cantidadSensoresConfigurados = 0;
+
+  int sensorCount = preferences.getInt("sensor_count", 0);
+
+  for (int i = 0; i < sensorCount && i < MAX_SENSORES_CONFIGURADOS; i++)
+  {
+    String prefix = "s" + String(i) + "_";
+
+    String role = preferences.getString((prefix + "role").c_str(), "");
+    String address = preferences.getString((prefix + "addr").c_str(), "");
+
+    role.toLowerCase();
+    address.toUpperCase();
+
+    if (role.length() == 0 || address.length() == 0)
+    {
+      continue;
+    }
+
+    sensoresConfigurados[cantidadSensoresConfigurados].role = role;
+    sensoresConfigurados[cantidadSensoresConfigurados].address = address;
+    sensoresConfigurados[cantidadSensoresConfigurados].temperature = NAN;
+    sensoresConfigurados[cantidadSensoresConfigurados].hasReading = false;
+
+    sensoresConfigurados[cantidadSensoresConfigurados].alarmEnabled = preferences.getBool((prefix + "alm_en").c_str(), false);
+    sensoresConfigurados[cantidadSensoresConfigurados].tempMinAlarm = preferences.getFloat((prefix + "min").c_str(), -100.0);
+    sensoresConfigurados[cantidadSensoresConfigurados].tempMaxAlarm = preferences.getFloat((prefix + "max").c_str(), 100.0);
+    sensoresConfigurados[cantidadSensoresConfigurados].inAlarm = false;
+    sensoresConfigurados[cantidadSensoresConfigurados].previousAlarmState = false;
+    sensoresConfigurados[cantidadSensoresConfigurados].alarmReason = "";
+
+    cantidadSensoresConfigurados++;
+  }
+
+  Serial.print("Sensores configurados cargados desde memoria: ");
+  Serial.println(cantidadSensoresConfigurados);
 }
 
 void setup()
@@ -574,9 +770,15 @@ void setup()
 
   preferences.begin("smartcold", false);
 
-  compressorRelayOn = preferences.getBool("relay_on", false);
+  compressorRelayOn = false;
+  compressorShouldBeOn = false;
+  compressorCanTurnOn = false;
+
   localProtectionActive = true;
   localProtectionStartMillis = millis();
+  localProtectionWaitSecondsRemaining = configMinOffSeconds;
+
+  preferences.putBool("relay_on", false);
   preferences.putBool("prot_active", true);
 
   Serial.println("⚠️ Proteccion local iniciada por arranque/reinicio.");
@@ -585,6 +787,7 @@ void setup()
   configDifferential = preferences.getFloat("diff", 2.0);
   configMinOffSeconds = preferences.getInt("min_off", 180);
   configUpdatedAt = preferences.getString("cfg_time", "");
+  configControlSensorRole = preferences.getString("ctrl_role", configControlSensorRole);
   sensorCamaraAddress = preferences.getString("cam_addr", sensorCamaraAddress);
   sensorEvaporadorAddress = preferences.getString("evap_addr", sensorEvaporadorAddress);
 
@@ -592,6 +795,7 @@ void setup()
   Serial.println(sensorCamaraAddress);
   Serial.print("Sensor evaporador configurado: ");
   Serial.println(sensorEvaporadorAddress);
+  cargarSensoresConfiguradosDesdeMemoria();
   Serial.println("Configuracion local cargada:");
   Serial.print("Setpoint: ");
   Serial.println(configSetpoint);
@@ -644,6 +848,7 @@ void setup()
 void loop()
 {
   leerTemperaturasDS18B20();
+  evaluarAlarmasSensores();
   actualizarTemperaturaPrueba();
   calcularControlCompresorLocal();
   enviarTelemetria();

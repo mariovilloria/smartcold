@@ -47,6 +47,7 @@ class TelemetryData(BaseModel):
     online: bool
     detected_sensors: list[str] = []
     sensor_readings: Dict[str, float] = {}
+    sensor_alarms: Dict[str, dict] = {}
 
 
 # =====================================
@@ -201,6 +202,7 @@ def receive_telemetry(data: TelemetryData):
     print("Wait seconds:", data.compressor_wait_seconds_remaining)
     print("Detected sensors:", data.detected_sensors)
     print("Sensor readings:", data.sensor_readings)
+    print("Sensor alarms:", data.sensor_alarms)
     print("Timestamp:", datetime.now())
 
     now = datetime.now()
@@ -238,6 +240,7 @@ def receive_telemetry(data: TelemetryData):
         "compressor_wait_seconds_remaining": data.compressor_wait_seconds_remaining,
         "detected_sensors": data.detected_sensors,
         "sensor_readings": data.sensor_readings,
+        "sensor_alarms": data.sensor_alarms,
         "timestamp": now_iso,
     }
 
