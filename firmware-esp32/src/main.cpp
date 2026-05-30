@@ -8,6 +8,8 @@
 #include <DallasTemperature.h>
 
 const bool BORRAR_WIFI_AL_INICIAR = false;
+unsigned long ultimoIntentoConfig = 0;
+const unsigned long INTERVALO_CONFIG_MS = 60000;
 
 const String DEVICE_ID = "SmartCold-5494";
 const String API_BASE_URL = "http://192.168.18.8:8000";
@@ -31,6 +33,7 @@ int configMinOffSeconds = 180;
 String configUpdatedAt = "";
 float temperaturaActual = 7.0;
 String sensorCamaraAddress = "285150C0000000AB";
+String sensorEvaporadorAddress = "";
 
 bool compressorShouldBeOn = false;
 bool compressorCanTurnOn = true;
@@ -151,16 +154,55 @@ void descargarConfiguracion()
 
   String remoteUpdatedAt = config["updated_at"] | "";
 
-  float newSetpoint = config["setpoint"] | configSetpoint;
-  float newDifferential = config["differential"] | configDifferential;
-  int newMinOffSeconds = config["compressor_min_off_seconds"] | configMinOffSeconds;
-
+  float newSetpoint = configSetpoint;
+  float newDifferential = configDifferential;
+  int newMinOffSeconds = configMinOffSeconds;
   String newSensorCamaraAddress = sensorCamaraAddress;
+  String newSensorEvaporadorAddress = sensorEvaporadorAddress;
 
-  if (config["sensor_roles"].is<JsonObject>())
+  if (config["compressor"].is<JsonObject>())
+  {
+    JsonObject compressor = config["compressor"];
+
+    newSetpoint = compressor["setpoint"] | configSetpoint;
+    newDifferential = compressor["differential"] | configDifferential;
+    newMinOffSeconds = compressor["min_off_seconds"] | configMinOffSeconds;
+  }
+  else
+  {
+    newSetpoint = config["setpoint"] | configSetpoint;
+    newDifferential = config["differential"] | configDifferential;
+    newMinOffSeconds = config["compressor_min_off_seconds"] | configMinOffSeconds;
+  }
+
+  if (config["sensors"].is<JsonArray>())
+  {
+    JsonArray sensors = config["sensors"];
+
+    for (JsonObject sensor : sensors)
+    {
+      String role = sensor["role"] | "";
+      String address = sensor["address"] | "";
+      bool enabled = sensor["enabled"] | true;
+
+      role.toLowerCase();
+      address.toUpperCase();
+
+      if (enabled && address.length() > 0 && (role == "chamber" || role == "camara"))
+      {
+        newSensorCamaraAddress = address;
+      }
+      if (enabled && address.length() > 0 && (role == "evaporator" || role == "evaporador"))
+      {
+        newSensorEvaporadorAddress = address;
+      }
+    }
+  }
+  else if (config["sensor_roles"].is<JsonObject>())
   {
     JsonObject sensorRoles = config["sensor_roles"];
     newSensorCamaraAddress = sensorRoles["camara"] | sensorCamaraAddress;
+    newSensorCamaraAddress.toUpperCase();
   }
 
   bool camAddrNoGuardado = !preferences.isKey("cam_addr");
@@ -170,7 +212,8 @@ void descargarConfiguracion()
                         newSetpoint != configSetpoint ||
                         newDifferential != configDifferential ||
                         newMinOffSeconds != configMinOffSeconds ||
-                        newSensorCamaraAddress != sensorCamaraAddress);
+                        newSensorCamaraAddress != sensorCamaraAddress ||
+                        newSensorEvaporadorAddress != sensorEvaporadorAddress);
 
   if (!configChanged)
   {
@@ -184,12 +227,14 @@ void descargarConfiguracion()
   configMinOffSeconds = newMinOffSeconds;
   configUpdatedAt = remoteUpdatedAt;
   sensorCamaraAddress = newSensorCamaraAddress;
+  sensorEvaporadorAddress = newSensorEvaporadorAddress;
 
   preferences.putFloat("setpoint", configSetpoint);
   preferences.putFloat("diff", configDifferential);
   preferences.putInt("min_off", configMinOffSeconds);
   preferences.putString("cfg_time", configUpdatedAt);
   preferences.putString("cam_addr", sensorCamaraAddress);
+  preferences.putString("evap_addr", sensorEvaporadorAddress);
 
   Serial.println("✅ Configuracion guardada en memoria local:");
   Serial.print("Setpoint: ");
@@ -520,10 +565,12 @@ void setup()
   configMinOffSeconds = preferences.getInt("min_off", 180);
   configUpdatedAt = preferences.getString("cfg_time", "");
   sensorCamaraAddress = preferences.getString("cam_addr", sensorCamaraAddress);
+  sensorEvaporadorAddress = preferences.getString("evap_addr", sensorEvaporadorAddress);
 
   Serial.print("Sensor camara configurado: ");
   Serial.println(sensorCamaraAddress);
-
+  Serial.print("Sensor evaporador configurado: ");
+  Serial.println(sensorEvaporadorAddress);
   Serial.println("Configuracion local cargada:");
   Serial.print("Setpoint: ");
   Serial.println(configSetpoint);
@@ -579,6 +626,12 @@ void loop()
   actualizarTemperaturaPrueba();
   calcularControlCompresorLocal();
   enviarTelemetria();
+
+  if (millis() - ultimoIntentoConfig >= INTERVALO_CONFIG_MS)
+  {
+    ultimoIntentoConfig = millis();
+    descargarConfiguracion();
+  }
 
   delay(10000);
 }

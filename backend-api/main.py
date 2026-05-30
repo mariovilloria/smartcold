@@ -125,9 +125,42 @@ class CompressorConfig(BaseModel):
     min_off_seconds: int = 180
 
 
+class OutputConfig(BaseModel):
+    enabled: bool = True
+    pin: int
+    active_level: str = "HIGH"
+    name: str
+
+
+class OutputsConfig(BaseModel):
+    compressor: OutputConfig
+    defrost: OutputConfig
+    fan: OutputConfig
+    alarm: OutputConfig
+
+
+class DefrostConfig(BaseModel):
+    enabled: bool = False
+    mode: str = "time"
+    interval_minutes: int = 360
+    duration_minutes: int = 20
+    end_sensor_role: str = "evaporator"
+    end_temperature: float = 8
+
+
+class SafetyConfig(BaseModel):
+    offline_mode: str = "local_control"
+    sensor_error_action: str = "compressor_off"
+    max_compressor_runtime_minutes: int = 0
+
+
 class DeviceConfigUpdate(BaseModel):
+    config_version: int = 1
     compressor: CompressorConfig
     sensors: List[SensorConfig]
+    outputs: OutputsConfig
+    defrost: DefrostConfig
+    safety: SafetyConfig
 
 
 # =====================================
@@ -441,6 +474,7 @@ def get_device_config(device_id: str):
     if not doc.exists:
         default_config = {
             "device_id": device_id,
+            "config_version": 1,
             "compressor": {
                 "enabled": True,
                 "control_sensor_role": "chamber",
