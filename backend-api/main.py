@@ -46,6 +46,7 @@ class TelemetryData(BaseModel):
     rssi: int
     online: bool
     detected_sensors: list[str] = []
+    sensor_readings: Dict[str, float] = {}
 
 
 # =====================================
@@ -199,6 +200,7 @@ def receive_telemetry(data: TelemetryData):
     print("Compressor can turn on:", data.compressor_can_turn_on)
     print("Wait seconds:", data.compressor_wait_seconds_remaining)
     print("Detected sensors:", data.detected_sensors)
+    print("Sensor readings:", data.sensor_readings)
     print("Timestamp:", datetime.now())
 
     now = datetime.now()
@@ -235,6 +237,7 @@ def receive_telemetry(data: TelemetryData):
         "compressor_can_turn_on": data.compressor_can_turn_on,
         "compressor_wait_seconds_remaining": data.compressor_wait_seconds_remaining,
         "detected_sensors": data.detected_sensors,
+        "sensor_readings": data.sensor_readings,
         "timestamp": now_iso,
     }
 

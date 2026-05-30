@@ -32,6 +32,7 @@ float configDifferential = 2.0;
 int configMinOffSeconds = 180;
 String configUpdatedAt = "";
 float temperaturaActual = 7.0;
+float temperaturaEvaporador = NAN;
 String sensorCamaraAddress = "285150C0000000AB";
 String sensorEvaporadorAddress = "";
 
@@ -70,11 +71,20 @@ void enviarTelemetria()
   doc["compressor_should_be_on"] = compressorShouldBeOn;
   doc["compressor_can_turn_on"] = compressorCanTurnOn;
   doc["compressor_wait_seconds_remaining"] = localProtectionWaitSecondsRemaining;
+
   JsonArray detectedSensors = doc["detected_sensors"].to<JsonArray>();
 
   for (int i = 0; i < cantidadSensoresDetectados; i++)
   {
     detectedSensors.add(sensoresDetectados[i]);
+  }
+
+  JsonObject sensorReadings = doc["sensor_readings"].to<JsonObject>();
+  sensorReadings["chamber"] = temperaturaActual;
+
+  if (!isnan(temperaturaEvaporador))
+  {
+    sensorReadings["evaporator"] = temperaturaEvaporador;
   }
 
   String body;
@@ -521,7 +531,9 @@ void leerTemperaturasDS18B20()
       Serial.print(" = ");
       Serial.print(tempC);
       Serial.println(" °C");
+
       String direccionTexto = direccionSensorToString(direccion);
+
       if (cantidadSensoresDetectados < MAX_SENSORES_DS18B20)
       {
         sensoresDetectados[cantidadSensoresDetectados] = direccionTexto;
@@ -534,6 +546,15 @@ void leerTemperaturasDS18B20()
 
         Serial.print("✅ Temperatura de cámara actualizada: ");
         Serial.print(temperaturaActual);
+        Serial.println(" °C");
+      }
+
+      if (direccionTexto == sensorEvaporadorAddress && tempC != DEVICE_DISCONNECTED_C)
+      {
+        temperaturaEvaporador = tempC;
+
+        Serial.print("✅ Temperatura evaporador actualizada: ");
+        Serial.print(temperaturaEvaporador);
         Serial.println(" °C");
       }
     }
