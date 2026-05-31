@@ -67,7 +67,7 @@ bool localProtectionActive = false;
 unsigned long localProtectionStartMillis = 0;
 WiFiManager wifiManager;
 Preferences preferences;
-
+void descargarConfiguracion();
 void enviarTelemetria()
 {
   if (WiFi.status() != WL_CONNECTED)
@@ -141,8 +141,67 @@ void enviarTelemetria()
   Serial.println("RESPUESTA TELEMETRIA:");
   Serial.println(response);
 
+  JsonDocument responseDoc;
+  DeserializationError error = deserializeJson(responseDoc, response);
+
+  if (!error)
+  {
+    bool configPending = responseDoc["config_pending"] | false;
+
+    if (configPending)
+    {
+      Serial.println("⚙️ Configuracion pendiente detectada desde telemetria.");
+      descargarConfiguracion();
+    }
+  }
+  else
+  {
+    Serial.print("⚠️ No se pudo leer respuesta JSON de telemetria: ");
+    Serial.println(error.c_str());
+  }
+
   http.end();
 }
+
+void confirmarConfiguracionDescargada()
+{
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.println("❌ WIFI NO CONECTADO - NO SE PUEDE CONFIRMAR CONFIG");
+    return;
+  }
+
+  HTTPClient http;
+  String url = API_BASE_URL + "/api/devices/" + DEVICE_ID + "/config/ack";
+
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+
+  Serial.println();
+  Serial.println("✅ CONFIRMANDO CONFIGURACION DESCARGADA...");
+  Serial.println(url);
+
+  int httpCode = http.POST("{}");
+
+  if (httpCode <= 0)
+  {
+    Serial.print("ERROR HTTP ACK CONFIG: ");
+    Serial.println(http.errorToString(httpCode));
+    http.end();
+    return;
+  }
+
+  Serial.print("HTTP ACK CONFIG CODE: ");
+  Serial.println(httpCode);
+
+  String response = http.getString();
+
+  Serial.println("RESPUESTA ACK CONFIG:");
+  Serial.println(response);
+
+  http.end();
+}
+
 void descargarConfiguracion()
 {
   if (WiFi.status() != WL_CONNECTED)
@@ -301,6 +360,7 @@ void descargarConfiguracion()
   {
     Serial.println("Configuracion sin cambios. No se guarda en memoria.");
     http.end();
+    confirmarConfiguracionDescargada();
     return;
   }
 
@@ -333,6 +393,7 @@ void descargarConfiguracion()
   Serial.println(configUpdatedAt);
 
   http.end();
+  confirmarConfiguracionDescargada();
 }
 
 float obtenerTemperaturaPorRole(String role)
@@ -842,6 +903,10 @@ void setup()
   Serial.print("RSSI: ");
   Serial.println(WiFi.RSSI());
   descargarConfiguracion();
+
+  leerTemperaturasDS18B20();
+  evaluarAlarmasSensores();
+  calcularControlCompresorLocal();
   enviarTelemetria();
 }
 

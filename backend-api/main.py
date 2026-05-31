@@ -261,7 +261,15 @@ def receive_telemetry(data: TelemetryData):
         merge=True,
     )
 
-    return {"success": True, "message": "Telemetry received"}
+    config_doc = db.collection("device_config").document(data.device_id).get()
+    config_data = config_doc.to_dict() if config_doc.exists else {}
+    config_pending = bool(config_data.get("config_pending", False))
+
+    return {
+        "success": True,
+        "message": "Telemetry received",
+        "config_pending": config_pending,
+    }
 
 
 # =====================================
@@ -461,6 +469,7 @@ def update_device_config(device_id: str, config: DeviceConfigUpdate):
     config_data = config.model_dump()
     config_data["device_id"] = device_id
     config_data["updated_at"] = datetime.now().isoformat()
+    config_data["config_pending"] = True
 
     db.collection("device_config").document(device_id).set(config_data, merge=True)
 
@@ -551,6 +560,32 @@ def get_device_config(device_id: str):
         return {"success": True, "config": default_config}
 
     return {"success": True, "config": doc.to_dict()}
+
+
+@app.post("/api/devices/{device_id}/config/ack")
+def ack_device_config(device_id: str):
+
+    now_iso = datetime.now().isoformat()
+
+    db.collection("device_config").document(device_id).set(
+        {
+            "config_pending": False,
+            "last_config_ack_at": now_iso,
+        },
+        merge=True,
+    )
+
+    print("\n==============================")
+    print("CONFIGURACION CONFIRMADA POR ESP")
+    print("==============================")
+    print("Device:", device_id)
+    print("Ack at:", now_iso)
+
+    return {
+        "success": True,
+        "message": "Config acknowledged",
+        "config_pending": False,
+    }
 
 
 @app.get("/api/devices/{device_id}/dashboard")
