@@ -37,14 +37,36 @@ devices_db: Dict[str, dict] = {}
 
 class TelemetryData(BaseModel):
     device_id: str
-    compressor_relay_on: bool | None = None
-    compressor_should_be_on: bool | None = None
-    compressor_can_turn_on: bool | None = None
-    compressor_wait_seconds_remaining: int | None = None
+
     temperature: float
     humidity: float
     rssi: int
     online: bool
+
+    device_state: str | None = None
+    device_health: str | None = None
+    device_health_reason: str | None = None
+    compressor_block_reason: str | None = None
+
+    compressor_relay_on: bool | None = None
+    compressor_should_be_on: bool | None = None
+    compressor_can_turn_on: bool | None = None
+    compressor_wait_seconds_remaining: int | None = None
+    compressor_runtime_since_defrost_seconds: int | None = None
+
+    defrost_active: bool | None = None
+    defrost_elapsed_seconds: int | None = None
+    defrost_remaining_seconds: int | None = None
+    defrost_interval_minutes: int | None = None
+    defrost_duration_minutes: int | None = None
+    defrost_end_sensor_role: str | None = None
+    defrost_end_temperature: float | None = None
+
+    drip_active: bool | None = None
+    drip_elapsed_seconds: int | None = None
+    drip_remaining_seconds: int | None = None
+    drip_time_seconds: int | None = None
+
     detected_sensors: list[str] = []
     sensor_readings: Dict[str, float] = {}
     sensor_alarms: Dict[str, dict] = {}
@@ -234,10 +256,26 @@ def receive_telemetry(data: TelemetryData):
         "online": data.online,
         "alarm": alarm,
         "alarm_reason": alarm_reason,
+        "device_state": data.device_state,
+        "device_health": data.device_health,
+        "device_health_reason": data.device_health_reason,
+        "compressor_block_reason": data.compressor_block_reason,
         "compressor_relay_on": data.compressor_relay_on,
         "compressor_should_be_on": data.compressor_should_be_on,
         "compressor_can_turn_on": data.compressor_can_turn_on,
         "compressor_wait_seconds_remaining": data.compressor_wait_seconds_remaining,
+        "compressor_runtime_since_defrost_seconds": data.compressor_runtime_since_defrost_seconds,
+        "defrost_active": data.defrost_active,
+        "defrost_elapsed_seconds": data.defrost_elapsed_seconds,
+        "defrost_remaining_seconds": data.defrost_remaining_seconds,
+        "defrost_interval_minutes": data.defrost_interval_minutes,
+        "defrost_duration_minutes": data.defrost_duration_minutes,
+        "defrost_end_sensor_role": data.defrost_end_sensor_role,
+        "defrost_end_temperature": data.defrost_end_temperature,
+        "drip_active": data.drip_active,
+        "drip_elapsed_seconds": data.drip_elapsed_seconds,
+        "drip_remaining_seconds": data.drip_remaining_seconds,
+        "drip_time_seconds": data.drip_time_seconds,
         "detected_sensors": data.detected_sensors,
         "sensor_readings": data.sensor_readings,
         "sensor_alarms": data.sensor_alarms,
@@ -548,6 +586,7 @@ def get_device_config(device_id: str):
                 "duration_minutes": 20,
                 "end_sensor_role": "evaporator",
                 "end_temperature": 8,
+                "drip_time_seconds": 120,
             },
             "safety": {
                 "offline_mode": "local_control",

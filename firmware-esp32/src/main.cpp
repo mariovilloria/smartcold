@@ -12,6 +12,9 @@ unsigned long ultimoIntentoConfig = 0;
 const unsigned long INTERVALO_CONFIG_MS = 60000;
 // const unsigned long INTERVALO_CONFIG_MS = 15UL * 60UL * 1000UL;
 
+unsigned long ultimoIntentoWifi = 0;
+const unsigned long INTERVALO_REINTENTO_WIFI_MS = 30000;
+
 const String DEVICE_ID = "SmartCold-5494";
 const String API_BASE_URL = "http://192.168.18.8:8000";
 
@@ -52,6 +55,21 @@ int compressorOutputPin = 26;
 float configSetpoint = 4.0;
 float configDifferential = 2.0;
 int configMinOffSeconds = 180;
+bool configDefrostEnabled = false;
+int configDefrostIntervalMinutes = 360;
+int configDefrostDurationMinutes = 20;
+String configDefrostEndSensorRole = "evaporator";
+float configDefrostEndTemperature = 8.0;
+bool defrostActive = false;
+unsigned long defrostStartMillis = 0;
+unsigned long lastDefrostMillis = 0;
+
+bool dripActive = false;
+unsigned long dripStartMillis = 0;
+int configDripTimeSeconds = 120;
+
+unsigned long compressorRuntimeSinceDefrostSeconds = 0;
+unsigned long lastCompressorRuntimeUpdateMillis = 0;
 String configControlSensorRole = "chamber";
 String configUpdatedAt = "";
 float temperaturaActual = 7.0;
@@ -67,8 +85,99 @@ unsigned long compressorLastOffMillis = 0;
 bool localProtectionActive = false;
 unsigned long localProtectionStartMillis = 0;
 WiFiManager wifiManager;
+float obtenerTemperaturaPorRole(String role);
 Preferences preferences;
+
 void descargarConfiguracion();
+
+String obtenerEstadoOperativo()
+{
+  if (defrostActive)
+    return "DEFROST";
+
+  if (dripActive)
+    return "DRIP";
+
+  if (localProtectionActive)
+    return "PROTECTION";
+
+  if (compressorRelayOn)
+    return "COOLING";
+
+  return "IDLE";
+}
+
+String obtenerMotivoBloqueoCompresor()
+{
+  if (compressorRelayOn)
+    return "NONE";
+
+  if (defrostActive)
+    return "DEFROST";
+
+  if (dripActive)
+    return "DRIP";
+
+  if (localProtectionActive)
+    return "PROTECTION";
+
+  if (!compressorShouldBeOn)
+    return "TEMP_OK";
+
+  if (!compressorCanTurnOn)
+    return "BLOCKED";
+
+  return "NONE";
+}
+
+String obtenerSaludDispositivo()
+{
+  bool sensorControlSinLectura =
+      isnan(obtenerTemperaturaPorRole(configControlSensorRole));
+
+  bool evaporadorSinLectura =
+      isnan(obtenerTemperaturaPorRole("evaporator"));
+
+  if (sensorControlSinLectura)
+    return "CRITICAL";
+
+  if (evaporadorSinLectura)
+    return "WARNING";
+
+  for (int i = 0; i < cantidadSensoresConfigurados; i++)
+  {
+    if (sensoresConfigurados[i].inAlarm)
+      return "WARNING";
+  }
+
+  return "HEALTHY";
+}
+
+String obtenerMotivoSaludDispositivo()
+{
+  bool sensorControlSinLectura =
+      isnan(obtenerTemperaturaPorRole(configControlSensorRole));
+
+  bool evaporadorSinLectura =
+      isnan(obtenerTemperaturaPorRole("evaporator"));
+
+  if (sensorControlSinLectura)
+    return "CONTROL_SENSOR_MISSING";
+
+  if (evaporadorSinLectura)
+    return "EVAPORATOR_SENSOR_MISSING";
+
+  for (int i = 0; i < cantidadSensoresConfigurados; i++)
+  {
+    if (sensoresConfigurados[i].inAlarm)
+    {
+      return sensoresConfigurados[i].alarmReason;
+    }
+  }
+
+  return "NORMAL";
+}
+
 void enviarTelemetria()
 {
   if (WiFi.status() != WL_CONNECTED)
@@ -90,11 +199,77 @@ void enviarTelemetria()
   doc["humidity"] = 65;
   doc["rssi"] = WiFi.RSSI();
   doc["online"] = true;
+  doc["device_state"] = obtenerEstadoOperativo();
+  doc["device_health"] = obtenerSaludDispositivo();
+  doc["device_health_reason"] = obtenerMotivoSaludDispositivo();
+  doc["compressor_block_reason"] = obtenerMotivoBloqueoCompresor();
   doc["compressor_relay_on"] = compressorRelayOn;
   doc["compressor_should_be_on"] = compressorShouldBeOn;
   doc["compressor_can_turn_on"] = compressorCanTurnOn;
   doc["compressor_wait_seconds_remaining"] = localProtectionWaitSecondsRemaining;
+  doc["compressor_runtime_since_defrost_seconds"] =
+      compressorRuntimeSinceDefrostSeconds;
+  doc["defrost_active"] = defrostActive;
+  doc["defrost_interval_minutes"] =
+      configDefrostIntervalMinutes;
 
+  doc["defrost_duration_minutes"] =
+      configDefrostDurationMinutes;
+
+  doc["defrost_end_temperature"] =
+      configDefrostEndTemperature;
+
+  doc["defrost_end_sensor_role"] =
+      configDefrostEndSensorRole;
+
+  doc["drip_time_seconds"] =
+      configDripTimeSeconds;
+
+  if (defrostActive)
+  {
+    unsigned long defrostElapsed =
+        (millis() - defrostStartMillis) / 1000;
+
+    doc["defrost_elapsed_seconds"] = defrostElapsed;
+
+    unsigned long defrostDurationSeconds =
+        (unsigned long)configDefrostDurationMinutes * 60UL;
+
+    unsigned long defrostRemaining = 0;
+
+    if (defrostElapsed < defrostDurationSeconds)
+    {
+      defrostRemaining =
+          defrostDurationSeconds - defrostElapsed;
+    }
+
+    doc["defrost_remaining_seconds"] = defrostRemaining;
+  }
+  else
+  {
+    doc["defrost_elapsed_seconds"] = 0;
+    doc["defrost_remaining_seconds"] = 0;
+  }
+  doc["drip_active"] = dripActive;
+
+  if (dripActive)
+  {
+    unsigned long dripElapsed = (millis() - dripStartMillis) / 1000;
+    unsigned long dripRemaining = 0;
+
+    if (dripElapsed < (unsigned long)configDripTimeSeconds)
+    {
+      dripRemaining = (unsigned long)configDripTimeSeconds - dripElapsed;
+    }
+
+    doc["drip_elapsed_seconds"] = dripElapsed;
+    doc["drip_remaining_seconds"] = dripRemaining;
+  }
+  else
+  {
+    doc["drip_elapsed_seconds"] = 0;
+    doc["drip_remaining_seconds"] = 0;
+  }
   JsonArray detectedSensors = doc["detected_sensors"].to<JsonArray>();
 
   for (int i = 0; i < cantidadSensoresDetectados; i++)
@@ -260,6 +435,13 @@ void descargarConfiguracion()
   String newSensorCamaraAddress = sensorCamaraAddress;
   String newSensorEvaporadorAddress = sensorEvaporadorAddress;
 
+  bool newDefrostEnabled = configDefrostEnabled;
+  int newDefrostIntervalMinutes = configDefrostIntervalMinutes;
+  int newDefrostDurationMinutes = configDefrostDurationMinutes;
+  String newDefrostEndSensorRole = configDefrostEndSensorRole;
+  float newDefrostEndTemperature = configDefrostEndTemperature;
+  int newDripTimeSeconds = configDripTimeSeconds;
+
   if (config["compressor"].is<JsonObject>())
   {
     JsonObject compressor = config["compressor"];
@@ -277,10 +459,24 @@ void descargarConfiguracion()
     newMinOffSeconds = config["compressor_min_off_seconds"] | configMinOffSeconds;
   }
 
+  if (config["defrost"].is<JsonObject>())
+  {
+    JsonObject defrost = config["defrost"];
+
+    newDefrostEnabled = defrost["enabled"] | configDefrostEnabled;
+    newDefrostIntervalMinutes = defrost["interval_minutes"] | configDefrostIntervalMinutes;
+    newDefrostDurationMinutes = defrost["duration_minutes"] | configDefrostDurationMinutes;
+    newDefrostEndSensorRole = String(defrost["end_sensor_role"] | configDefrostEndSensorRole);
+    newDefrostEndSensorRole.toLowerCase();
+    newDefrostEndTemperature = defrost["end_temperature"] | configDefrostEndTemperature;
+    newDripTimeSeconds = defrost["drip_time_seconds"] | configDripTimeSeconds;
+  }
+
   if (config["sensors"].is<JsonArray>())
   {
     JsonArray sensors = config["sensors"];
     cantidadSensoresConfigurados = 0;
+
     for (JsonObject sensor : sensors)
     {
       String role = sensor["role"] | "";
@@ -289,6 +485,7 @@ void descargarConfiguracion()
 
       role.toLowerCase();
       address.toUpperCase();
+
       if (enabled && role.length() > 0 && address.length() > 0 && cantidadSensoresConfigurados < MAX_SENSORES_CONFIGURADOS)
       {
         sensoresConfigurados[cantidadSensoresConfigurados].role = role;
@@ -305,10 +502,12 @@ void descargarConfiguracion()
 
         cantidadSensoresConfigurados++;
       }
+
       if (enabled && address.length() > 0 && (role == "chamber" || role == "camara"))
       {
         newSensorCamaraAddress = address;
       }
+
       if (enabled && address.length() > 0 && (role == "evaporator" || role == "evaporador"))
       {
         newSensorEvaporadorAddress = address;
@@ -355,7 +554,13 @@ void descargarConfiguracion()
                         newDifferential != configDifferential ||
                         newMinOffSeconds != configMinOffSeconds ||
                         newSensorCamaraAddress != sensorCamaraAddress ||
-                        newSensorEvaporadorAddress != sensorEvaporadorAddress);
+                        newSensorEvaporadorAddress != sensorEvaporadorAddress ||
+                        newDefrostEnabled != configDefrostEnabled ||
+                        newDefrostIntervalMinutes != configDefrostIntervalMinutes ||
+                        newDefrostDurationMinutes != configDefrostDurationMinutes ||
+                        newDefrostEndSensorRole != configDefrostEndSensorRole ||
+                        newDefrostEndTemperature != configDefrostEndTemperature ||
+                        newDripTimeSeconds != configDripTimeSeconds);
 
   if (!configChanged)
   {
@@ -373,6 +578,13 @@ void descargarConfiguracion()
   sensorCamaraAddress = newSensorCamaraAddress;
   sensorEvaporadorAddress = newSensorEvaporadorAddress;
 
+  configDefrostEnabled = newDefrostEnabled;
+  configDefrostIntervalMinutes = newDefrostIntervalMinutes;
+  configDefrostDurationMinutes = newDefrostDurationMinutes;
+  configDefrostEndSensorRole = newDefrostEndSensorRole;
+  configDefrostEndTemperature = newDefrostEndTemperature;
+  configDripTimeSeconds = newDripTimeSeconds;
+
   preferences.putFloat("setpoint", configSetpoint);
   preferences.putFloat("diff", configDifferential);
   preferences.putInt("min_off", configMinOffSeconds);
@@ -380,6 +592,13 @@ void descargarConfiguracion()
   preferences.putString("cfg_time", configUpdatedAt);
   preferences.putString("cam_addr", sensorCamaraAddress);
   preferences.putString("evap_addr", sensorEvaporadorAddress);
+
+  preferences.putBool("def_en", configDefrostEnabled);
+  preferences.putInt("def_int", configDefrostIntervalMinutes);
+  preferences.putInt("def_dur", configDefrostDurationMinutes);
+  preferences.putString("def_role", configDefrostEndSensorRole);
+  preferences.putFloat("def_temp", configDefrostEndTemperature);
+  preferences.putInt("drip_sec", configDripTimeSeconds);
 
   Serial.println("✅ Configuracion guardada en memoria local:");
   Serial.print("Setpoint: ");
@@ -392,6 +611,20 @@ void descargarConfiguracion()
   Serial.println(sensorCamaraAddress);
   Serial.print("Updated at: ");
   Serial.println(configUpdatedAt);
+
+  Serial.println("Defrost configurado:");
+  Serial.print("Enabled: ");
+  Serial.println(configDefrostEnabled ? "SI" : "NO");
+  Serial.print("Interval minutes: ");
+  Serial.println(configDefrostIntervalMinutes);
+  Serial.print("Duration minutes: ");
+  Serial.println(configDefrostDurationMinutes);
+  Serial.print("End sensor role: ");
+  Serial.println(configDefrostEndSensorRole);
+  Serial.print("End temperature: ");
+  Serial.println(configDefrostEndTemperature);
+  Serial.print("Drip time seconds: ");
+  Serial.println(configDripTimeSeconds);
 
   http.end();
   confirmarConfiguracionDescargada();
@@ -470,6 +703,119 @@ void aplicarSalidaCompresor()
   Serial.println(compressorRelayOn ? "ON" : "OFF");
 }
 
+void actualizarTiempoCompresorParaDefrost()
+{
+  unsigned long ahora = millis();
+
+  if (lastCompressorRuntimeUpdateMillis == 0)
+  {
+    lastCompressorRuntimeUpdateMillis = ahora;
+    return;
+  }
+
+  unsigned long deltaMs = ahora - lastCompressorRuntimeUpdateMillis;
+  lastCompressorRuntimeUpdateMillis = ahora;
+
+  if (compressorRelayOn && !defrostActive)
+  {
+    compressorRuntimeSinceDefrostSeconds += deltaMs / 1000;
+  }
+}
+
+void verificarInicioDefrost()
+{
+  if (!configDefrostEnabled)
+    return;
+
+  if (defrostActive)
+    return;
+
+  unsigned long intervaloMs =
+      (unsigned long)configDefrostIntervalMinutes * 60UL * 1000UL;
+
+  if (millis() - lastDefrostMillis >= intervaloMs)
+  {
+    Serial.println();
+    Serial.println("❄️ INICIO DE DEFROST PROGRAMADO");
+
+    defrostActive = true;
+    defrostStartMillis = millis();
+  }
+}
+
+void verificarFinDefrost()
+{
+  if (!defrostActive)
+    return;
+
+  unsigned long duracionMaximaMs =
+      (unsigned long)configDefrostDurationMinutes * 60UL * 1000UL;
+
+  unsigned long tiempoDefrostMs = millis() - defrostStartMillis;
+
+  float temperaturaFin = obtenerTemperaturaPorRole(configDefrostEndSensorRole);
+
+  if (!isnan(temperaturaFin) && temperaturaFin >= configDefrostEndTemperature)
+  {
+    Serial.println();
+    Serial.println("✅ DEFROST FINALIZADO POR TEMPERATURA");
+    Serial.print("Sensor fin: ");
+    Serial.println(configDefrostEndSensorRole);
+    Serial.print("Temperatura: ");
+    Serial.println(temperaturaFin);
+
+    defrostActive = false;
+
+    dripActive = true;
+    dripStartMillis = millis();
+
+    lastDefrostMillis = millis();
+    compressorRuntimeSinceDefrostSeconds = 0;
+
+    Serial.println("💧 INICIANDO TIEMPO DE GOTEO");
+
+    return;
+  }
+
+  if (tiempoDefrostMs >= duracionMaximaMs)
+  {
+    Serial.println();
+    Serial.println("⚠️ DEFROST FINALIZADO POR TIEMPO MAXIMO");
+    Serial.print("Duracion configurada: ");
+    Serial.print(configDefrostDurationMinutes);
+    Serial.println(" minutos");
+
+    defrostActive = false;
+
+    dripActive = true;
+    dripStartMillis = millis();
+
+    lastDefrostMillis = millis();
+    compressorRuntimeSinceDefrostSeconds = 0;
+
+    Serial.println("💧 INICIANDO TIEMPO DE GOTEO");
+
+    return;
+  }
+}
+
+void verificarFinGoteo()
+{
+  if (!dripActive)
+    return;
+
+  unsigned long tiempoGoteoMs =
+      (unsigned long)configDripTimeSeconds * 1000UL;
+
+  if (millis() - dripStartMillis >= tiempoGoteoMs)
+  {
+    dripActive = false;
+
+    Serial.println();
+    Serial.println("✅ TIEMPO DE GOTEO FINALIZADO");
+  }
+}
+
 void calcularControlCompresorLocal()
 {
   bool estadoAnterior = compressorRelayOn;
@@ -486,6 +832,7 @@ void calcularControlCompresorLocal()
     localProtectionWaitSecondsRemaining = 0;
 
     preferences.putBool("relay_on", false);
+    aplicarSalidaCompresor();
     return;
   }
 
@@ -503,7 +850,6 @@ void calcularControlCompresorLocal()
   }
 
   compressorCanTurnOn = true;
-
   localProtectionWaitSecondsRemaining = 0;
 
   if (localProtectionActive)
@@ -528,7 +874,15 @@ void calcularControlCompresorLocal()
     }
   }
 
-  compressorRelayOn = compressorShouldBeOn && compressorCanTurnOn;
+  if (defrostActive || dripActive)
+  {
+    compressorCanTurnOn = false;
+    compressorRelayOn = false;
+  }
+  else
+  {
+    compressorRelayOn = compressorShouldBeOn && compressorCanTurnOn;
+  }
 
   if (estadoAnterior && !compressorRelayOn)
   {
@@ -541,11 +895,42 @@ void calcularControlCompresorLocal()
     compressorCanTurnOn = false;
     localProtectionWaitSecondsRemaining = configMinOffSeconds;
 
-    Serial.println("⚠️ Compresor apagado. Proteccion local iniciada.");
+    if (defrostActive)
+    {
+      Serial.println("❄️ Compresor apagado por defrost.");
+    }
+    else
+    {
+      Serial.println("⚠️ Compresor apagado. Proteccion local iniciada.");
+    }
   }
 
   preferences.putBool("relay_on", compressorRelayOn);
   aplicarSalidaCompresor();
+
+  Serial.println();
+  Serial.println("====== ESTADO GENERAL ======");
+
+  if (defrostActive)
+  {
+    Serial.println("Estado: DEFROST");
+  }
+  else if (dripActive)
+  {
+    Serial.println("Estado: GOTEO");
+  }
+  else if (localProtectionActive)
+  {
+    Serial.println("Estado: PROTECCION");
+  }
+  else if (compressorRelayOn)
+  {
+    Serial.println("Estado: ENFRIANDO");
+  }
+  else
+  {
+    Serial.println("Estado: ESPERA");
+  }
 
   Serial.println();
   Serial.println("====== CONTROL LOCAL COMPRESOR ======");
@@ -555,6 +940,18 @@ void calcularControlCompresorLocal()
   Serial.print("Temperatura control: ");
   Serial.println(temperaturaControl);
 
+  float temperaturaEvaporadorStatus = obtenerTemperaturaPorRole("evaporator");
+
+  Serial.print("Temperatura evaporador: ");
+  if (isnan(temperaturaEvaporadorStatus))
+  {
+    Serial.println("SIN LECTURA");
+  }
+  else
+  {
+    Serial.println(temperaturaEvaporadorStatus);
+  }
+
   Serial.print("Setpoint: ");
   Serial.println(configSetpoint);
 
@@ -563,6 +960,22 @@ void calcularControlCompresorLocal()
 
   Serial.print("Temperatura encendido: ");
   Serial.println(temperaturaEncendido);
+
+  Serial.print("Defrost activo: ");
+  Serial.println(defrostActive ? "SI" : "NO");
+  Serial.print("Sensor fin defrost: ");
+  Serial.println(configDefrostEndSensorRole);
+
+  Serial.print("Temperatura fin defrost: ");
+  Serial.println(configDefrostEndTemperature);
+
+  Serial.print("Duracion maxima defrost: ");
+  Serial.print(configDefrostDurationMinutes);
+  Serial.println(" minutos");
+
+  Serial.print("Tiempo goteo: ");
+  Serial.print(configDripTimeSeconds);
+  Serial.println(" segundos");
 
   Serial.print("Debe encender: ");
   Serial.println(compressorShouldBeOn ? "SI" : "NO");
@@ -576,6 +989,53 @@ void calcularControlCompresorLocal()
 
   Serial.print("Relay compresor: ");
   Serial.println(compressorRelayOn ? "ON" : "OFF");
+
+  Serial.print("Tiempo compresor desde ultimo defrost: ");
+  Serial.print(compressorRuntimeSinceDefrostSeconds);
+  Serial.println(" segundos");
+  if (defrostActive)
+  {
+    Serial.print("Defrost transcurrido: ");
+    Serial.print((millis() - defrostStartMillis) / 1000);
+    Serial.println(" segundos");
+  }
+  if (dripActive)
+  {
+    unsigned long dripElapsed = (millis() - dripStartMillis) / 1000;
+    unsigned long dripRemaining = 0;
+
+    if (dripElapsed < (unsigned long)configDripTimeSeconds)
+    {
+      dripRemaining = (unsigned long)configDripTimeSeconds - dripElapsed;
+    }
+
+    Serial.print("Goteo transcurrido: ");
+    Serial.print(dripElapsed);
+    Serial.println(" segundos");
+
+    Serial.print("Goteo restante: ");
+    Serial.print(dripRemaining);
+    Serial.println(" segundos");
+  }
+  unsigned long intervaloDefrostSeg =
+      (unsigned long)configDefrostIntervalMinutes * 60UL;
+
+  unsigned long tiempoDesdeUltimoDefrostSeg =
+      (millis() - lastDefrostMillis) / 1000;
+
+  if (!defrostActive)
+  {
+    unsigned long restante = 0;
+
+    if (tiempoDesdeUltimoDefrostSeg < intervaloDefrostSeg)
+    {
+      restante = intervaloDefrostSeg - tiempoDesdeUltimoDefrostSeg;
+    }
+
+    Serial.print("Proximo defrost en: ");
+    Serial.print(restante);
+    Serial.println(" segundos");
+  }
   Serial.println("=====================================");
 }
 
@@ -853,6 +1313,8 @@ void setup()
   localProtectionStartMillis = millis();
   localProtectionWaitSecondsRemaining = configMinOffSeconds;
 
+  lastDefrostMillis = millis();
+
   preferences.putBool("relay_on", false);
   preferences.putBool("prot_active", true);
 
@@ -865,6 +1327,13 @@ void setup()
   configControlSensorRole = preferences.getString("ctrl_role", configControlSensorRole);
   sensorCamaraAddress = preferences.getString("cam_addr", sensorCamaraAddress);
   sensorEvaporadorAddress = preferences.getString("evap_addr", sensorEvaporadorAddress);
+
+  configDefrostEnabled = preferences.getBool("def_en", configDefrostEnabled);
+  configDefrostIntervalMinutes = preferences.getInt("def_int", configDefrostIntervalMinutes);
+  configDefrostDurationMinutes = preferences.getInt("def_dur", configDefrostDurationMinutes);
+  configDefrostEndSensorRole = preferences.getString("def_role", configDefrostEndSensorRole);
+  configDefrostEndTemperature = preferences.getFloat("def_temp", configDefrostEndTemperature);
+  configDripTimeSeconds = preferences.getInt("drip_sec", configDripTimeSeconds);
 
   Serial.print("Sensor camara configurado: ");
   Serial.println(sensorCamaraAddress);
@@ -880,6 +1349,26 @@ void setup()
   Serial.println(configMinOffSeconds);
   Serial.print("Updated at: ");
   Serial.println(configUpdatedAt);
+
+  Serial.println("Configuracion defrost local:");
+  Serial.print("Enabled: ");
+  Serial.println(configDefrostEnabled ? "SI" : "NO");
+
+  Serial.print("Interval minutes: ");
+  Serial.println(configDefrostIntervalMinutes);
+
+  Serial.print("Duration minutes: ");
+  Serial.println(configDefrostDurationMinutes);
+
+  Serial.print("End sensor role: ");
+  Serial.println(configDefrostEndSensorRole);
+
+  Serial.print("End temperature: ");
+  Serial.println(configDefrostEndTemperature);
+
+  Serial.print("Drip time seconds: ");
+  Serial.println(configDripTimeSeconds);
+
   Serial.print("Estado relay guardado: ");
   Serial.println(compressorRelayOn ? "ON" : "OFF");
 
@@ -924,12 +1413,38 @@ void setup()
   enviarTelemetria();
 }
 
+void verificarConexionWifi()
+{
+  if (WiFi.status() == WL_CONNECTED)
+    return;
+
+  unsigned long ahora = millis();
+
+  if (ahora - ultimoIntentoWifi < INTERVALO_REINTENTO_WIFI_MS)
+    return;
+
+  ultimoIntentoWifi = ahora;
+
+  Serial.println("📶 WIFI DESCONECTADO - INTENTANDO RECONECTAR...");
+  WiFi.disconnect();
+  WiFi.reconnect();
+}
+
 void loop()
 {
   leerTemperaturasDS18B20();
   evaluarAlarmasSensores();
+
+  verificarInicioDefrost();
+  verificarFinDefrost();
+  verificarFinGoteo();
+
   actualizarTemperaturaPrueba();
   calcularControlCompresorLocal();
+  actualizarTiempoCompresorParaDefrost();
+
+  verificarConexionWifi();
+
   enviarTelemetria();
 
   if (millis() - ultimoIntentoConfig >= INTERVALO_CONFIG_MS)
