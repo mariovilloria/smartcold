@@ -48,6 +48,7 @@ const bool MODO_PRUEBA_TEMPERATURA = false;
 unsigned long ultimoCambioTemperaturaPrueba = 0;
 
 bool compressorRelayOn = false;
+int compressorOutputPin = 26;
 float configSetpoint = 4.0;
 float configDifferential = 2.0;
 int configMinOffSeconds = 180;
@@ -459,6 +460,16 @@ void evaluarAlarmasSensores()
   }
 }
 
+void aplicarSalidaCompresor()
+{
+  digitalWrite(compressorOutputPin, compressorRelayOn ? HIGH : LOW);
+
+  Serial.print("Salida fisica compresor GPIO ");
+  Serial.print(compressorOutputPin);
+  Serial.print(": ");
+  Serial.println(compressorRelayOn ? "ON" : "OFF");
+}
+
 void calcularControlCompresorLocal()
 {
   bool estadoAnterior = compressorRelayOn;
@@ -534,6 +545,7 @@ void calcularControlCompresorLocal()
   }
 
   preferences.putBool("relay_on", compressorRelayOn);
+  aplicarSalidaCompresor();
 
   Serial.println();
   Serial.println("====== CONTROL LOCAL COMPRESOR ======");
@@ -830,6 +842,8 @@ void setup()
   detectarSensoresDS18B20();
 
   preferences.begin("smartcold", false);
+  pinMode(compressorOutputPin, OUTPUT);
+  digitalWrite(compressorOutputPin, LOW);
 
   compressorRelayOn = false;
   compressorShouldBeOn = false;
