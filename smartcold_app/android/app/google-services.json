@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "649501100610",
+    "project_id": "smartcold-test",
+    "storage_bucket": "smartcold-test.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:649501100610:android:127d21e63fc7f4fd6c3bdb",
+        "android_client_info": {
+          "package_name": "com.example.smartcold_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAiJL2rhJS85rtqWe_dIu97EYprPcA9364"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

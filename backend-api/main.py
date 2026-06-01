@@ -57,6 +57,7 @@ class TelemetryData(BaseModel):
     defrost_active: bool | None = None
     defrost_elapsed_seconds: int | None = None
     defrost_remaining_seconds: int | None = None
+    defrost_next_seconds: int | None = None
     defrost_interval_minutes: int | None = None
     defrost_duration_minutes: int | None = None
     defrost_end_sensor_role: str | None = None
@@ -268,6 +269,7 @@ def receive_telemetry(data: TelemetryData):
         "defrost_active": data.defrost_active,
         "defrost_elapsed_seconds": data.defrost_elapsed_seconds,
         "defrost_remaining_seconds": data.defrost_remaining_seconds,
+        "defrost_next_seconds": data.defrost_next_seconds,
         "defrost_interval_minutes": data.defrost_interval_minutes,
         "defrost_duration_minutes": data.defrost_duration_minutes,
         "defrost_end_sensor_role": data.defrost_end_sensor_role,

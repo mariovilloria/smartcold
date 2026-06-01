@@ -225,6 +225,22 @@ void enviarTelemetria()
   doc["drip_time_seconds"] =
       configDripTimeSeconds;
 
+  unsigned long defrostIntervalSeconds =
+      (unsigned long)configDefrostIntervalMinutes * 60UL;
+
+  unsigned long secondsSinceLastDefrost =
+      (millis() - lastDefrostMillis) / 1000;
+
+  unsigned long defrostNextSeconds = 0;
+
+  if (!defrostActive && secondsSinceLastDefrost < defrostIntervalSeconds)
+  {
+    defrostNextSeconds =
+        defrostIntervalSeconds - secondsSinceLastDefrost;
+  }
+
+  doc["defrost_next_seconds"] = defrostNextSeconds;
+
   if (defrostActive)
   {
     unsigned long defrostElapsed =
