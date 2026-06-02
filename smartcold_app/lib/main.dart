@@ -2,8 +2,57 @@ import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'dart:async';
+import 'dart:convert';
+import 'package:http/http.dart' as http;
 
 import 'firebase_options.dart';
+
+enum CoolingMode { refrigerate, freeze }
+
+class CoolingProfile {
+  const CoolingProfile({
+    required this.mode,
+    required this.level,
+    required this.targetTemperature,
+  });
+
+  final CoolingMode mode;
+  final int level;
+  final double targetTemperature;
+}
+
+CoolingProfile getCoolingProfile({
+  required CoolingMode mode,
+  required int level,
+}) {
+  final safeLevel = level.clamp(1, 7);
+
+  if (mode == CoolingMode.freeze) {
+    const values = {
+      1: -12.0,
+      2: -14.0,
+      3: -16.0,
+      4: -18.0,
+      5: -20.0,
+      6: -22.0,
+      7: -24.0,
+    };
+
+    return CoolingProfile(
+      mode: mode,
+      level: safeLevel,
+      targetTemperature: values[safeLevel]!,
+    );
+  }
+
+  const values = {1: 7.0, 2: 6.0, 3: 5.0, 4: 4.0, 5: 3.0, 6: 2.0, 7: 1.0};
+
+  return CoolingProfile(
+    mode: mode,
+    level: safeLevel,
+    targetTemperature: values[safeLevel]!,
+  );
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -46,6 +95,9 @@ class DeviceStatusPage extends StatefulWidget {
 
 class _DeviceStatusPageState extends State<DeviceStatusPage> {
   Timer? _timer;
+  int? _selectedCoolingLevel;
+  bool _dialUnlocked = false;
+  int? _levelBeforeEdit;
 
   @override
   void initState() {
@@ -66,7 +118,7 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
 
   @override
   Widget build(BuildContext context) {
-    final docRef = FirebaseFirestore.instance
+    final statusRef = FirebaseFirestore.instance
         .collection('device_status')
         .doc(widget.deviceId);
 
@@ -87,19 +139,19 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
         ),
         child: SafeArea(
           child: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-            stream: docRef.snapshots(),
-            builder: (context, snapshot) {
-              if (snapshot.hasError) {
+            stream: statusRef.snapshots(),
+            builder: (context, statusSnapshot) {
+              if (statusSnapshot.hasError) {
                 return const Center(
                   child: Text('Error leyendo estado del equipo'),
                 );
               }
 
-              if (!snapshot.hasData) {
+              if (!statusSnapshot.hasData) {
                 return const Center(child: CircularProgressIndicator());
               }
 
-              final data = snapshot.data!.data();
+              final data = statusSnapshot.data!.data();
 
               if (data == null) {
                 return Center(
@@ -107,11 +159,33 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
                 );
               }
 
+              final savedCoolingLevel =
+                  _selectedCoolingLevel ?? _intFromDynamic(data['cooling_level']) ?? 4;
+
+              final visibleCoolingLevel =
+                  _selectedCoolingLevel ?? savedCoolingLevel;
+
+              final operationMode = _coolingModeFromString(
+                data['operation_mode'],
+              );
+
+              final coolingProfile = getCoolingProfile(
+                mode: operationMode,
+                level: visibleCoolingLevel,
+              );
+
+              final setpoint = coolingProfile.targetTemperature;
+              const differential = 2.0;
+              final turnOnTemp = setpoint + differential;
+              final turnOffTemp = setpoint;
+
               final secondsSinceLastSeen = _secondsSinceLastSeen(
                 data['last_seen_at'],
               );
 
-              final connectionStatus = _connectionStatus(secondsSinceLastSeen);
+              final connectionStatus = _connectionStatus(
+                secondsSinceLastSeen,
+              );
 
               final lastUpdateText = _lastUpdateText(secondsSinceLastSeen);
 
@@ -119,133 +193,254 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
               final evaporatorTemp = _sensorValue(data, 'evaporator');
 
               return Column(
-                children: [
-                  Expanded(
-                    child: ListView(
-                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
-                      children: [
-                        _TopBar(
-                          connectionStatus: connectionStatus,
-                          rssi: data['rssi'],
-                        ),
-                        const SizedBox(height: 14),
+                    children: [
+                      Expanded(
+                        child: ListView(
+                          padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
+                          children: [
+                            _TopBar(
+                              connectionStatus: connectionStatus,
+                              rssi: data['rssi'],
+                            ),
+                            const SizedBox(height: 14),
 
-                        _HeroPanel(
-                          deviceName:
-                              data['device_name'] ??
-                              data['name'] ??
-                              widget.deviceId,
-                          health: data['device_health'],
-                          healthReason: data['device_health_reason'],
-                          state: data['device_state'],
-                          online: connectionStatus != 'offline',
-                          rssi: data['rssi'],
-                          compressorOn: data['compressor_relay_on'],
-                          blockReason: data['compressor_block_reason'],
-                        ),
+                            _HeroPanel(
+                              deviceName:
+                                  data['device_name'] ??
+                                  data['name'] ??
+                                  widget.deviceId,
+                              health: data['device_health'],
+                              healthReason: data['device_health_reason'],
+                              state: data['device_state'],
+                              online: connectionStatus != 'offline',
+                              rssi: data['rssi'],
+                              compressorOn: data['compressor_relay_on'],
+                              blockReason: data['compressor_block_reason'],
+                            ),
 
-                        const SizedBox(height: 12),
+                            const SizedBox(height: 8),
 
-                        LayoutBuilder(
-                          builder: (context, constraints) {
-                            return GridView.count(
-                              shrinkWrap: true,
-                              physics: const NeverScrollableScrollPhysics(),
-                              crossAxisCount: 3,
-                              crossAxisSpacing: 8,
-                              mainAxisSpacing: 8,
-                              childAspectRatio: constraints.maxWidth < 430
-                                  ? 0.95
-                                  : 1.25,
-                              children: [
-                                _KpiCard(
-                                  title: 'Cámara',
-                                  value: chamberTemp,
-                                  suffix: '°C',
-                                  icon: Icons.thermostat_rounded,
-                                  badgeText: _sensorAlarmText(data, 'chamber'),
-                                  accent: const Color(0xFF1EA7FF),
+                            _CoolingLevelDial(
+                              level: visibleCoolingLevel,
+                              setpoint: setpoint,
+                              turnOnTemp: turnOnTemp,
+                              turnOffTemp: turnOffTemp,
+                              unlocked: _dialUnlocked,
+                              onUnlockChanged: (value) {
+                                setState(() {
+                                  if (value) {
+                                    _levelBeforeEdit = visibleCoolingLevel;
+                                    _dialUnlocked = true;
+                                    return;
+                                  }
+
+                                  _selectedCoolingLevel = _levelBeforeEdit;
+                                  _levelBeforeEdit = null;
+                                  _dialUnlocked = false;
+                                });
+                              },
+                              onLevelChanged: (newLevel) {
+                                if (!_dialUnlocked) return;
+
+                                setState(() {
+                                  _selectedCoolingLevel = newLevel;
+                                });
+                              },
+                            ),
+
+                            if (_dialUnlocked &&
+                                _selectedCoolingLevel != null &&
+                                _levelBeforeEdit != null &&
+                                _selectedCoolingLevel != _levelBeforeEdit) ...[
+                              const SizedBox(height: 8),
+                              SizedBox(
+                                width: double.infinity,
+                                child: ElevatedButton.icon(
+                                  onPressed: () async {
+                                    final levelToSave = _selectedCoolingLevel;
+
+                                    if (levelToSave == null) return;
+
+                                    try {
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        const SnackBar(
+                                          content: Text('Guardando ajuste...'),
+                                          duration: Duration(seconds: 1),
+                                        ),
+                                      );
+
+                                      final response = await http.post(
+                                        Uri.parse(
+                                          'https://smartcold-api-649501100610.us-central1.run.app/api/devices/${widget.deviceId}/cooling-level',
+                                        ),
+                                        headers: {
+                                          'Content-Type': 'application/json',
+                                        },
+                                        body: jsonEncode({
+                                          'cooling_level': levelToSave,
+                                        }),
+                                      );
+
+                                      final body = jsonDecode(response.body);
+
+                                      if (response.statusCode != 200 ||
+                                          body['success'] != true) {
+                                        throw Exception(
+                                          body['message'] ??
+                                              'No se pudo guardar el ajuste',
+                                        );
+                                      }
+
+                                      if (!context.mounted) return;
+
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        SnackBar(
+                                          content: Text(
+                                            'Nivel $levelToSave guardado',
+                                          ),
+                                          duration: const Duration(seconds: 2),
+                                        ),
+                                      );
+                                      setState(() {
+                                        _selectedCoolingLevel = levelToSave;
+                                        _levelBeforeEdit = null;
+                                        _dialUnlocked = false;
+                                      });
+                                    } catch (e) {
+                                      if (!context.mounted) return;
+
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        SnackBar(
+                                          content: Text('Error guardando: $e'),
+                                          duration: const Duration(seconds: 4),
+                                        ),
+                                      );
+                                    }
+                                  },
+                                  icon: const Icon(Icons.save_rounded),
+                                  label: const Text('Guardar ajuste'),
                                 ),
-                                _KpiCard(
-                                  title: 'Evaporador',
-                                  value: evaporatorTemp,
-                                  suffix: '°C',
-                                  icon: Icons.ac_unit_rounded,
-                                  badgeText: _sensorAlarmText(
-                                    data,
-                                    'evaporator',
-                                  ),
-                                  accent: const Color(0xFF21B9FF),
-                                ),
-                                _MiniCompressorKpi(
-                                  relayOn: data['compressor_relay_on'],
-                                  shouldBeOn: data['compressor_should_be_on'],
-                                  protectionSeconds:
-                                      data['compressor_wait_seconds_remaining'],
+                              ),
+                            ],
+
+                            const SizedBox(height: 18),
+
+                            LayoutBuilder(
+                              builder: (context, constraints) {
+                                return GridView.count(
+                                  shrinkWrap: true,
+                                  physics: const NeverScrollableScrollPhysics(),
+                                  crossAxisCount: 3,
+                                  crossAxisSpacing: 8,
+                                  mainAxisSpacing: 8,
+                                  childAspectRatio: constraints.maxWidth < 430
+                                      ? 0.95
+                                      : 1.25,
+                                  children: [
+                                    _KpiCard(
+                                      title: 'Cámara',
+                                      value: chamberTemp,
+                                      suffix: '°C',
+                                      icon: Icons.thermostat_rounded,
+                                      badgeText: _sensorAlarmText(
+                                        data,
+                                        'chamber',
+                                      ),
+                                      accent: const Color(0xFF1EA7FF),
+                                    ),
+                                    _KpiCard(
+                                      title: 'Evaporador',
+                                      value: evaporatorTemp,
+                                      suffix: '°C',
+                                      icon: Icons.ac_unit_rounded,
+                                      badgeText: _sensorAlarmText(
+                                        data,
+                                        'evaporator',
+                                      ),
+                                      accent: const Color(0xFF21B9FF),
+                                    ),
+                                    _MiniCompressorKpi(
+                                      relayOn: data['compressor_relay_on'],
+                                      shouldBeOn:
+                                          data['compressor_should_be_on'],
+                                      protectionSeconds:
+                                          data['compressor_wait_seconds_remaining'],
+                                      connectionStatus: connectionStatus,
+                                      secondsSinceLastSeen:
+                                          secondsSinceLastSeen,
+                                    ),
+                                  ],
+                                );
+                              },
+                            ),
+
+                            const SizedBox(height: 12),
+
+                            LayoutBuilder(
+                              builder: (context, constraints) {
+                                final defrostCard = _DefrostCard(
+                                  active: data['defrost_active'],
+                                  evaporatorTemp: evaporatorTemp,
+                                  chamberTemp: chamberTemp,
+                                  endTemperature:
+                                      data['defrost_end_temperature'],
+                                  remainingSeconds:
+                                      data['defrost_remaining_seconds'],
+                                  nextSeconds: data['defrost_next_seconds'],
+                                  durationMinutes:
+                                      data['defrost_duration_minutes'],
+                                  intervalMinutes:
+                                      data['defrost_interval_minutes'],
                                   connectionStatus: connectionStatus,
                                   secondsSinceLastSeen: secondsSinceLastSeen,
-                                ),
-                              ],
-                            );
-                          },
+                                );
+
+                                final dripCard = _DripCard(
+                                  active: data['drip_active'],
+                                  configuredSeconds: data['drip_time_seconds'],
+                                  remainingSeconds:
+                                      data['drip_remaining_seconds'],
+                                  connectionStatus: connectionStatus,
+                                  secondsSinceLastSeen: secondsSinceLastSeen,
+                                );
+
+                                return IntrinsicHeight(
+                                  child: Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    children: [
+                                      Expanded(child: defrostCard),
+                                      const SizedBox(width: 8),
+                                      Expanded(child: dripCard),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+                          ],
                         ),
-
-                        const SizedBox(height: 12),
-
-                        LayoutBuilder(
-                          builder: (context, constraints) {
-                            final defrostCard = _DefrostCard(
-                              active: data['defrost_active'],
-                              evaporatorTemp: evaporatorTemp,
-                              chamberTemp: chamberTemp,
-                              endTemperature: data['defrost_end_temperature'],
-                              remainingSeconds:
-                                  data['defrost_remaining_seconds'],
-                              nextSeconds: data['defrost_next_seconds'],
-                              durationMinutes: data['defrost_duration_minutes'],
-                              intervalMinutes: data['defrost_interval_minutes'],
-                              connectionStatus: connectionStatus,
-                              secondsSinceLastSeen: secondsSinceLastSeen,
-                            );
-
-                            final dripCard = _DripCard(
-                              active: data['drip_active'],
-                              configuredSeconds: data['drip_time_seconds'],
-                              remainingSeconds: data['drip_remaining_seconds'],
-                              connectionStatus: connectionStatus,
-                              secondsSinceLastSeen: secondsSinceLastSeen,
-                            );
-
-                            return IntrinsicHeight(
-                              child: Row(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: [
-                                  Expanded(child: defrostCard),
-                                  const SizedBox(width: 8),
-                                  Expanded(child: dripCard),
-                                ],
-                              ),
-                            );
-                          },
-                        ),
-                      ],
-                    ),
-                  ),
-
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: Text(
-                      lastUpdateText,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        color: Color(0xFF9DB0C1),
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
                       ),
-                    ),
-                  ),
-                ],
-              );
+
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: Text(
+                          lastUpdateText,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: Color(0xFF9DB0C1),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
             },
           ),
         ),
@@ -313,6 +508,21 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
     if (hours == 1) return 'Actualizado hace 1 h';
 
     return 'Actualizado hace $hours h';
+  }
+
+  static int? _intFromDynamic(dynamic value) {
+    if (value == null) return null;
+    if (value is int) return value;
+    if (value is double) return value.round();
+    return int.tryParse(value.toString());
+  }
+
+  static CoolingMode _coolingModeFromString(dynamic value) {
+    if (value?.toString() == 'freeze') {
+      return CoolingMode.freeze;
+    }
+
+    return CoolingMode.refrigerate;
   }
 
   static dynamic _sensorValue(Map<String, dynamic> data, String role) {
@@ -463,7 +673,7 @@ class _HeroPanel extends StatelessWidget {
     final stateIcon = _stateIcon(rawState);
 
     return Container(
-      margin: const EdgeInsets.only(bottom: 14),
+      margin: EdgeInsets.zero,
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(26),
@@ -512,30 +722,36 @@ class _HeroPanel extends StatelessWidget {
               ),
               border: Border.all(color: stateColor.withValues(alpha: 0.32)),
             ),
-            child: Row(
+            child: Stack(
+              alignment: Alignment.center,
               children: [
-                Container(
-                  width: 46,
-                  height: 46,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: stateColor.withValues(alpha: 0.18),
-                    boxShadow: [
-                      BoxShadow(
-                        color: stateColor.withValues(alpha: 0.2),
-                        blurRadius: 18,
-                      ),
-                    ],
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Container(
+                    width: 46,
+                    height: 46,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: stateColor.withValues(alpha: 0.18),
+                      boxShadow: [
+                        BoxShadow(
+                          color: stateColor.withValues(alpha: 0.2),
+                          blurRadius: 18,
+                        ),
+                      ],
+                    ),
+                    child: Icon(stateIcon, color: stateColor, size: 28),
                   ),
-                  child: Icon(stateIcon, color: stateColor, size: 28),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
+
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 56),
                   child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
                     children: [
                       const Text(
                         'ESTADO DEL EQUIPO',
+                        textAlign: TextAlign.center,
                         style: TextStyle(
                           color: Color(0xFFB6C7D6),
                           fontSize: 10,
@@ -546,6 +762,7 @@ class _HeroPanel extends StatelessWidget {
                       const SizedBox(height: 3),
                       Text(
                         stateText,
+                        textAlign: TextAlign.center,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
@@ -615,6 +832,337 @@ class _HeroPanel extends StatelessWidget {
 
     return '';
   }
+}
+
+class _CoolingLevelDial extends StatefulWidget {
+  const _CoolingLevelDial({
+    required this.level,
+    required this.setpoint,
+    required this.turnOnTemp,
+    required this.turnOffTemp,
+    required this.unlocked,
+    required this.onUnlockChanged,
+    required this.onLevelChanged,
+  });
+
+  final int level;
+  final double setpoint;
+  final double turnOnTemp;
+  final double turnOffTemp;
+  final bool unlocked;
+  final ValueChanged<bool> onUnlockChanged;
+  final ValueChanged<int> onLevelChanged;
+
+  @override
+  State<_CoolingLevelDial> createState() => _CoolingLevelDialState();
+}
+
+class _CoolingLevelDialState extends State<_CoolingLevelDial> {
+  late final PageController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = PageController(
+      initialPage: widget.level - 1,
+      viewportFraction: 0.16,
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant _CoolingLevelDial oldWidget) {
+    super.didUpdateWidget(oldWidget);
+
+    if (oldWidget.level != widget.level && _controller.hasClients) {
+      _controller.animateToPage(
+        widget.level - 1,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const accent = Color(0xFF00A8FF);
+
+    return SizedBox(
+      height: 104,
+      width: double.infinity,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          Positioned.fill(
+            top: 20,
+            child: CustomPaint(painter: _EmbeddedDialPainter()),
+          ),
+
+          const Positioned(
+            top: 0,
+            child: Text(
+              'NIVEL DE FRÍO',
+              style: TextStyle(
+                color: Color(0xFF9DB0C1),
+                fontSize: 9,
+                fontWeight: FontWeight.w900,
+                letterSpacing: 1.4,
+              ),
+            ),
+          ),
+
+          Positioned(
+            top: 0,
+            right: 0,
+            child: GestureDetector(
+              onTap: () {
+                widget.onUnlockChanged(!widget.unlocked);
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                decoration: BoxDecoration(
+                  color: widget.unlocked
+                      ? accent.withValues(alpha: 0.18)
+                      : Colors.white.withValues(alpha: 0.06),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                    color: widget.unlocked
+                        ? accent.withValues(alpha: 0.45)
+                        : Colors.white.withValues(alpha: 0.12),
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      widget.unlocked
+                          ? Icons.lock_open_rounded
+                          : Icons.lock_rounded,
+                      color: widget.unlocked ? accent : const Color(0xFF9DB0C1),
+                      size: 11,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      widget.unlocked ? 'CANCELAR' : 'DESBLOQ',
+                      style: TextStyle(
+                        color: widget.unlocked
+                            ? accent
+                            : const Color(0xFF9DB0C1),
+                        fontSize: 8,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 0.4,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+
+          Positioned(
+            top: 24,
+            left: 0,
+            right: 0,
+            height: 62,
+            child: PageView.builder(
+              controller: _controller,
+              physics: widget.unlocked
+                  ? const PageScrollPhysics()
+                  : const NeverScrollableScrollPhysics(),
+              itemCount: 7,
+              onPageChanged: (index) {
+                widget.onLevelChanged(index + 1);
+              },
+              itemBuilder: (context, index) {
+                final number = index + 1;
+
+                return AnimatedBuilder(
+                  animation: _controller,
+                  builder: (context, child) {
+                    double page = widget.level - 1;
+
+                    if (_controller.hasClients &&
+                        _controller.position.haveDimensions) {
+                      page = _controller.page ?? page;
+                    }
+
+                    final distance = (page - index).abs().clamp(0.0, 3.0);
+                    final selected = distance < 0.35;
+                    final scale = selected ? 1.65 : 1.0 - (distance * 0.12);
+                    final opacity = selected ? 1.0 : (0.72 - distance * 0.16);
+
+                    return Center(
+                      child: Transform.scale(
+                        scale: scale.clamp(0.68, 1.65),
+                        child: Text(
+                          '$number',
+                          style: TextStyle(
+                            color: selected
+                                ? Colors.white
+                                : Colors.white.withValues(
+                                    alpha: opacity.clamp(0.22, 0.72),
+                                  ),
+                            fontSize: selected ? 31 : 21,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+
+          Positioned(
+            top: 20,
+            child: IgnorePointer(
+              child: Container(
+                width: 62,
+                height: 62,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(color: accent, width: 1.35),
+                  gradient: RadialGradient(
+                    colors: [
+                      accent.withValues(alpha: 0.16),
+                      const Color(0xFF020B14).withValues(alpha: 0.18),
+                    ],
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: accent.withValues(alpha: 0.28),
+                      blurRadius: 18,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+
+          Positioned(
+            bottom: 0,
+            left: 0,
+            right: 0,
+            child: Row(
+              children: [
+                Expanded(
+                  child: _InlineDialInfo(
+                    label: 'ENCIENDE',
+                    value: widget.turnOnTemp,
+                    color: accent,
+                  ),
+                ),
+                Expanded(
+                  child: _InlineDialInfo(
+                    label: 'SETPOINT',
+                    value: widget.setpoint,
+                    color: Colors.white,
+                  ),
+                ),
+                Expanded(
+                  child: _InlineDialInfo(
+                    label: 'APAGA',
+                    value: widget.turnOffTemp,
+                    color: accent,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _InlineDialInfo extends StatelessWidget {
+  const _InlineDialInfo({
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  final String label;
+  final double value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text.rich(
+      textAlign: TextAlign.center,
+      TextSpan(
+        children: [
+          TextSpan(
+            text: '$label ',
+            style: const TextStyle(
+              color: Color(0xFF8DA1B2),
+              fontSize: 7.5,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.3,
+            ),
+          ),
+          TextSpan(
+            text: '${value.toStringAsFixed(1)}°',
+            style: TextStyle(
+              color: color,
+              fontSize: 10.5,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _EmbeddedDialPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final centerY = size.height * 0.55;
+
+    final glowLinePaint = Paint()
+      ..color = const Color(0xFF00A8FF).withValues(alpha: 0.16)
+      ..strokeWidth = 1.2;
+
+    final softLinePaint = Paint()
+      ..color = Colors.white.withValues(alpha: 0.13)
+      ..strokeWidth = 1;
+
+    final shadowPaint = Paint()
+      ..color = Colors.black.withValues(alpha: 0.22)
+      ..style = PaintingStyle.fill;
+
+    final topRect = Rect.fromLTWH(0, centerY - 30, size.width, 62);
+    final rrect = RRect.fromRectAndRadius(topRect, const Radius.circular(60));
+    canvas.drawRRect(rrect, shadowPaint);
+
+    canvas.drawLine(
+      Offset(0, centerY),
+      Offset(size.width, centerY),
+      glowLinePaint,
+    );
+
+    for (int i = 0; i <= 42; i++) {
+      final x = size.width * i / 42;
+      final major = i % 7 == 0;
+      final h = major ? 24.0 : 10.0;
+
+      canvas.drawLine(
+        Offset(x, centerY - h / 2),
+        Offset(x, centerY + h / 2),
+        softLinePaint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class _KpiCard extends StatelessWidget {

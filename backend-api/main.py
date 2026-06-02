@@ -199,6 +199,10 @@ class DeviceConfigUpdate(BaseModel):
     safety: SafetyConfig
 
 
+class CoolingLevelUpdate(BaseModel):
+    cooling_level: int
+
+
 # =====================================
 # RUTAS BASICAS
 # =====================================
@@ -757,4 +761,98 @@ def get_device_control(device_id: str):
         ),
         "alarm": status.get("alarm", False),
         "alarm_reason": status.get("alarm_reason"),
+    }
+
+
+@app.post("/api/devices/{device_id}/cooling-level")
+def update_device_cooling_level(device_id: str, data: CoolingLevelUpdate):
+
+    if data.cooling_level < 1 or data.cooling_level > 7:
+        return {
+            "success": False,
+            "message": "Cooling level must be between 1 and 7",
+        }
+
+    config_ref = db.collection("device_config").document(device_id)
+    config_doc = config_ref.get()
+
+    if not config_doc.exists:
+        return {
+            "success": False,
+            "message": "Device config not found",
+        }
+
+    config = config_doc.to_dict() or {}
+
+    operation_mode = config.get("operation_mode", "refrigerate")
+
+    if operation_mode == "freeze":
+        level_map = {
+            1: -12.0,
+            2: -14.0,
+            3: -16.0,
+            4: -18.0,
+            5: -20.0,
+            6: -22.0,
+            7: -24.0,
+        }
+    else:
+        level_map = {
+            1: 7.0,
+            2: 6.0,
+            3: 5.0,
+            4: 4.0,
+            5: 3.0,
+            6: 2.0,
+            7: 1.0,
+        }
+
+    setpoint = level_map[data.cooling_level]
+    differential = 2.0
+    turn_on_temperature = setpoint + differential
+
+    temp_max_alarm = turn_on_temperature + 2.0
+
+    if operation_mode == "freeze":
+        temp_min_alarm = setpoint - 4.0
+    else:
+        temp_min_alarm = max(setpoint - 2.0, 0.0)
+
+    compressor = config.get("compressor", {})
+    compressor["setpoint"] = setpoint
+    compressor["differential"] = differential
+
+    sensors = config.get("sensors", [])
+
+    for sensor in sensors:
+        if sensor.get("role") == "chamber":
+            sensor["temp_max_alarm"] = temp_max_alarm
+            sensor["temp_min_alarm"] = temp_min_alarm
+
+    now_iso = datetime.now().isoformat()
+
+    update_data = {
+        "operation_mode": operation_mode,
+        "cooling_level": data.cooling_level,
+        "config_source": "client_profile",
+        "compressor": compressor,
+        "sensors": sensors,
+        "config_pending": True,
+        "updated_at": now_iso,
+    }
+
+    config_ref.set(update_data, merge=True)
+
+    return {
+        "success": True,
+        "device_id": device_id,
+        "operation_mode": operation_mode,
+        "cooling_level": data.cooling_level,
+        "setpoint": setpoint,
+        "differential": differential,
+        "turn_on_temperature": turn_on_temperature,
+        "turn_off_temperature": setpoint,
+        "temp_max_alarm": temp_max_alarm,
+        "temp_min_alarm": temp_min_alarm,
+        "config_pending": True,
     }
