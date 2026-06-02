@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'dart:async';
 
 import 'firebase_options.dart';
 
@@ -34,16 +35,40 @@ class MyApp extends StatelessWidget {
   }
 }
 
-class DeviceStatusPage extends StatelessWidget {
+class DeviceStatusPage extends StatefulWidget {
   const DeviceStatusPage({super.key, required this.deviceId});
 
   final String deviceId;
 
   @override
+  State<DeviceStatusPage> createState() => _DeviceStatusPageState();
+}
+
+class _DeviceStatusPageState extends State<DeviceStatusPage> {
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) {
+        setState(() {});
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final docRef = FirebaseFirestore.instance
         .collection('device_status')
-        .doc(deviceId);
+        .doc(widget.deviceId);
 
     return Scaffold(
       backgroundColor: const Color(0xFF020B14),
@@ -77,100 +102,147 @@ class DeviceStatusPage extends StatelessWidget {
               final data = snapshot.data!.data();
 
               if (data == null) {
-                return Center(child: Text('No existe estado para $deviceId'));
+                return Center(
+                  child: Text('No existe estado para ${widget.deviceId}'),
+                );
               }
+
+              final secondsSinceLastSeen = _secondsSinceLastSeen(
+                data['last_seen_at'],
+              );
+
+              final connectionStatus = _connectionStatus(secondsSinceLastSeen);
+
+              final lastUpdateText = _lastUpdateText(secondsSinceLastSeen);
 
               final chamberTemp = _sensorValue(data, 'chamber');
               final evaporatorTemp = _sensorValue(data, 'evaporator');
 
-              return ListView(
-                padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
+              return Column(
                 children: [
-                  _TopBar(online: data['online'], rssi: data['rssi']),
-                  const SizedBox(height: 14),
-
-                  _HeroPanel(
-                    deviceName: data['device_name'] ?? data['name'] ?? deviceId,
-                    health: data['device_health'],
-                    healthReason: data['device_health_reason'],
-                    state: data['device_state'],
-                    online: data['online'],
-                    rssi: data['rssi'],
-                    compressorOn: data['compressor_relay_on'],
-                    blockReason: data['compressor_block_reason'],
-                  ),
-
-                  LayoutBuilder(
-                    builder: (context, constraints) {
-                      return GridView.count(
-                        shrinkWrap: true,
-                        physics: const NeverScrollableScrollPhysics(),
-                        crossAxisCount: 3,
-                        crossAxisSpacing: 8,
-                        mainAxisSpacing: 8,
-                        childAspectRatio: constraints.maxWidth < 430
-                            ? 0.95
-                            : 1.25,
-                        children: [
-                          _KpiCard(
-                            title: 'Cámara',
-                            value: chamberTemp,
-                            suffix: '°C',
-                            icon: Icons.thermostat_rounded,
-                            badgeText: _sensorAlarmText(data, 'chamber'),
-                            accent: const Color(0xFF1EA7FF),
-                          ),
-                          _KpiCard(
-                            title: 'Evaporador',
-                            value: evaporatorTemp,
-                            suffix: '°C',
-                            icon: Icons.ac_unit_rounded,
-                            badgeText: _sensorAlarmText(data, 'evaporator'),
-                            accent: const Color(0xFF21B9FF),
-                          ),
-                          _MiniCompressorKpi(
-                            relayOn: data['compressor_relay_on'],
-                            shouldBeOn: data['compressor_should_be_on'],
-                            protectionSeconds:
-                                data['compressor_wait_seconds_remaining'],
-                          ),
-                        ],
-                      );
-                    },
-                  ),
-
-                  const SizedBox(height: 12),
-
-                  LayoutBuilder(
-                    builder: (context, constraints) {
-                      final defrostCard = _DefrostCard(
-                        active: data['defrost_active'],
-                        evaporatorTemp: evaporatorTemp,
-                        chamberTemp: chamberTemp,
-                        endTemperature: data['defrost_end_temperature'],
-                        remainingSeconds: data['defrost_remaining_seconds'],
-                        nextSeconds: data['defrost_next_seconds'],
-                        durationMinutes: data['defrost_duration_minutes'],
-                        intervalMinutes: data['defrost_interval_minutes'],
-                      );
-
-                      final dripCard = _DripCard(
-                        active: data['drip_active'],
-                        configuredSeconds: data['drip_time_seconds'],
-                        remainingSeconds: data['drip_remaining_seconds'],
-                      );
-
-                      return IntrinsicHeight(
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            Expanded(child: defrostCard),
-                            const SizedBox(width: 8),
-                            Expanded(child: dripCard),
-                          ],
+                  Expanded(
+                    child: ListView(
+                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
+                      children: [
+                        _TopBar(
+                          connectionStatus: connectionStatus,
+                          rssi: data['rssi'],
                         ),
-                      );
-                    },
+                        const SizedBox(height: 14),
+
+                        _HeroPanel(
+                          deviceName:
+                              data['device_name'] ??
+                              data['name'] ??
+                              widget.deviceId,
+                          health: data['device_health'],
+                          healthReason: data['device_health_reason'],
+                          state: data['device_state'],
+                          online: connectionStatus != 'offline',
+                          rssi: data['rssi'],
+                          compressorOn: data['compressor_relay_on'],
+                          blockReason: data['compressor_block_reason'],
+                        ),
+
+                        const SizedBox(height: 12),
+
+                        LayoutBuilder(
+                          builder: (context, constraints) {
+                            return GridView.count(
+                              shrinkWrap: true,
+                              physics: const NeverScrollableScrollPhysics(),
+                              crossAxisCount: 3,
+                              crossAxisSpacing: 8,
+                              mainAxisSpacing: 8,
+                              childAspectRatio: constraints.maxWidth < 430
+                                  ? 0.95
+                                  : 1.25,
+                              children: [
+                                _KpiCard(
+                                  title: 'Cámara',
+                                  value: chamberTemp,
+                                  suffix: '°C',
+                                  icon: Icons.thermostat_rounded,
+                                  badgeText: _sensorAlarmText(data, 'chamber'),
+                                  accent: const Color(0xFF1EA7FF),
+                                ),
+                                _KpiCard(
+                                  title: 'Evaporador',
+                                  value: evaporatorTemp,
+                                  suffix: '°C',
+                                  icon: Icons.ac_unit_rounded,
+                                  badgeText: _sensorAlarmText(
+                                    data,
+                                    'evaporator',
+                                  ),
+                                  accent: const Color(0xFF21B9FF),
+                                ),
+                                _MiniCompressorKpi(
+                                  relayOn: data['compressor_relay_on'],
+                                  shouldBeOn: data['compressor_should_be_on'],
+                                  protectionSeconds:
+                                      data['compressor_wait_seconds_remaining'],
+                                  connectionStatus: connectionStatus,
+                                  secondsSinceLastSeen: secondsSinceLastSeen,
+                                ),
+                              ],
+                            );
+                          },
+                        ),
+
+                        const SizedBox(height: 12),
+
+                        LayoutBuilder(
+                          builder: (context, constraints) {
+                            final defrostCard = _DefrostCard(
+                              active: data['defrost_active'],
+                              evaporatorTemp: evaporatorTemp,
+                              chamberTemp: chamberTemp,
+                              endTemperature: data['defrost_end_temperature'],
+                              remainingSeconds:
+                                  data['defrost_remaining_seconds'],
+                              nextSeconds: data['defrost_next_seconds'],
+                              durationMinutes: data['defrost_duration_minutes'],
+                              intervalMinutes: data['defrost_interval_minutes'],
+                              connectionStatus: connectionStatus,
+                              secondsSinceLastSeen: secondsSinceLastSeen,
+                            );
+
+                            final dripCard = _DripCard(
+                              active: data['drip_active'],
+                              configuredSeconds: data['drip_time_seconds'],
+                              remainingSeconds: data['drip_remaining_seconds'],
+                              connectionStatus: connectionStatus,
+                              secondsSinceLastSeen: secondsSinceLastSeen,
+                            );
+
+                            return IntrinsicHeight(
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  Expanded(child: defrostCard),
+                                  const SizedBox(width: 8),
+                                  Expanded(child: dripCard),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: Text(
+                      lastUpdateText,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: Color(0xFF9DB0C1),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                   ),
                 ],
               );
@@ -179,6 +251,68 @@ class DeviceStatusPage extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  static int? _secondsSinceLastSeen(dynamic value) {
+    if (value == null) return null;
+
+    DateTime? lastSeenUtc;
+
+    if (value is Timestamp) {
+      lastSeenUtc = value.toDate().toUtc();
+    } else if (value is String) {
+      final parsed = DateTime.tryParse(value);
+
+      if (parsed != null) {
+        lastSeenUtc = DateTime.utc(
+          parsed.year,
+          parsed.month,
+          parsed.day,
+          parsed.hour,
+          parsed.minute,
+          parsed.second,
+          parsed.millisecond,
+          parsed.microsecond,
+        );
+      }
+    }
+
+    if (lastSeenUtc == null) return null;
+
+    final seconds = DateTime.now().toUtc().difference(lastSeenUtc).inSeconds;
+
+    if (seconds < 0) return 0;
+
+    return seconds;
+  }
+
+  static String _connectionStatus(int? seconds) {
+    if (seconds == null) return 'offline';
+    if (seconds <= 30) return 'online';
+    if (seconds <= 90) return 'warning';
+    return 'offline';
+  }
+
+  static String _lastUpdateText(int? seconds) {
+    if (seconds == null) return 'Sin información de actualización';
+
+    if (seconds < 10) return 'Actualizado';
+
+    if (seconds < 60) {
+      final roundedSeconds = (seconds ~/ 10) * 10;
+      return 'Actualizado hace $roundedSeconds seg';
+    }
+
+    final minutes = seconds ~/ 60;
+
+    if (minutes == 1) return 'Actualizado hace 1 min';
+    if (minutes < 60) return 'Actualizado hace $minutes min';
+
+    final hours = minutes ~/ 60;
+
+    if (hours == 1) return 'Actualizado hace 1 h';
+
+    return 'Actualizado hace $hours h';
   }
 
   static dynamic _sensorValue(Map<String, dynamic> data, String role) {
@@ -206,20 +340,32 @@ class DeviceStatusPage extends StatelessWidget {
 }
 
 class _TopBar extends StatelessWidget {
-  const _TopBar({required this.online, required this.rssi});
+  const _TopBar({required this.connectionStatus, required this.rssi});
 
-  final dynamic online;
+  final String connectionStatus;
   final dynamic rssi;
 
   @override
   Widget build(BuildContext context) {
-    final isOnline = online == true;
+    final isOnline = connectionStatus == 'online';
+    final isWarning = connectionStatus == 'warning';
+
+    final color = isOnline
+        ? const Color(0xFF20D76D)
+        : isWarning
+        ? Colors.orangeAccent
+        : Colors.redAccent;
+
+    final label = isOnline
+        ? 'ONLINE'
+        : isWarning
+        ? 'SIN ACTUALIZAR'
+        : 'OFFLINE';
 
     return Row(
       children: [
         const Icon(Icons.menu_rounded, color: Colors.white, size: 32),
         const SizedBox(width: 14),
-
         Container(
           width: 42,
           height: 42,
@@ -229,9 +375,7 @@ class _TopBar extends StatelessWidget {
           ),
           child: const Icon(Icons.ac_unit_rounded, color: Color(0xFF00A8FF)),
         ),
-
         const SizedBox(width: 10),
-
         const Expanded(
           child: Text.rich(
             TextSpan(
@@ -255,21 +399,16 @@ class _TopBar extends StatelessWidget {
             ),
           ),
         ),
-
         Column(
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(
-                  Icons.circle,
-                  color: isOnline ? const Color(0xFF20D76D) : Colors.redAccent,
-                  size: 10,
-                ),
+                Icon(Icons.circle, color: color, size: 10),
                 const SizedBox(width: 5),
                 Text(
-                  isOnline ? 'ONLINE' : 'OFFLINE',
+                  label,
                   style: const TextStyle(
                     color: Colors.white,
                     fontWeight: FontWeight.w800,
@@ -278,9 +417,7 @@ class _TopBar extends StatelessWidget {
                 ),
               ],
             ),
-
             const SizedBox(height: 2),
-
             Text(
               '${rssi ?? "--"} dBm',
               style: const TextStyle(
@@ -501,6 +638,7 @@ class _KpiCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final textValue = _formatNumber(value);
     final inAlarm = badgeText != 'NORMAL';
+    final cardAccent = inAlarm ? Colors.redAccent : accent;
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -510,19 +648,21 @@ class _KpiCard extends StatelessWidget {
           padding: EdgeInsets.all(compact ? 7 : 9),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(16),
-            gradient: const LinearGradient(
-              colors: [Color(0xFF062033), Color(0xFF082B49)],
+            gradient: LinearGradient(
+              colors: inAlarm
+                  ? const [Color(0xFF3A0710), Color(0xFF5A0B18)]
+                  : const [Color(0xFF062033), Color(0xFF082B49)],
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
             ),
-            border: Border.all(color: accent.withValues(alpha: 0.65)),
+            border: Border.all(color: cardAccent.withValues(alpha: 0.85)),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
                 children: [
-                  Icon(icon, color: accent, size: compact ? 15 : 17),
+                  Icon(icon, color: cardAccent, size: compact ? 15 : 17),
                   const SizedBox(width: 4),
                   Expanded(
                     child: Text(
@@ -551,9 +691,9 @@ class _KpiCard extends StatelessWidget {
                         children: [
                           TextSpan(
                             text: textValue,
-                            style: TextStyle(
+                            style: const TextStyle(
                               color: Colors.white,
-                              fontSize: compact ? 32 : 38,
+                              fontSize: 38,
                               fontWeight: FontWeight.w900,
                               height: 0.9,
                             ),
@@ -561,7 +701,7 @@ class _KpiCard extends StatelessWidget {
                           TextSpan(
                             text: ' $suffix',
                             style: TextStyle(
-                              color: accent,
+                              color: cardAccent,
                               fontSize: compact ? 12 : 14,
                               fontWeight: FontWeight.w900,
                             ),
@@ -577,9 +717,7 @@ class _KpiCard extends StatelessWidget {
                 child: _TinyPill(
                   icon: Icons.thermostat_rounded,
                   text: inAlarm ? badgeText : 'NORMAL',
-                  color: inAlarm
-                      ? const Color(0xFF1EA7FF)
-                      : const Color(0xFF20D76D),
+                  color: inAlarm ? Colors.redAccent : const Color(0xFF20D76D),
                 ),
               ),
             ],
@@ -600,6 +738,8 @@ class _DefrostCard extends StatelessWidget {
     required this.nextSeconds,
     required this.durationMinutes,
     required this.intervalMinutes,
+    required this.connectionStatus,
+    required this.secondsSinceLastSeen,
   });
 
   final dynamic active;
@@ -610,10 +750,24 @@ class _DefrostCard extends StatelessWidget {
   final dynamic nextSeconds;
   final dynamic durationMinutes;
   final dynamic intervalMinutes;
+  final String connectionStatus;
+  final int? secondsSinceLastSeen;
 
   @override
   Widget build(BuildContext context) {
     final isActive = active == true;
+
+    final baseSeconds = isActive
+        ? _toInt(remainingSeconds)
+        : _toInt(nextSeconds);
+
+    final elapsed = connectionStatus == 'online'
+        ? (secondsSinceLastSeen ?? 0)
+        : 0;
+
+    final displaySeconds = baseSeconds == null
+        ? null
+        : (baseSeconds - elapsed).clamp(0, 999999);
 
     return _GlassCard(
       borderColor: const Color(0xFFA855F7),
@@ -642,7 +796,7 @@ class _DefrostCard extends StatelessWidget {
               Expanded(
                 child: _MiniMetric(
                   label: isActive ? 'Restante' : 'Próximo',
-                  value: isActive ? remainingSeconds : nextSeconds,
+                  value: displaySeconds,
                   suffix: 's',
                   color: const Color(0xFFC084FC),
                   icon: Icons.timer_rounded,
@@ -654,6 +808,13 @@ class _DefrostCard extends StatelessWidget {
       ),
     );
   }
+
+  static int? _toInt(dynamic value) {
+    if (value == null) return null;
+    if (value is int) return value;
+    if (value is double) return value.round();
+    return int.tryParse(value.toString());
+  }
 }
 
 class _DripCard extends StatelessWidget {
@@ -661,15 +822,33 @@ class _DripCard extends StatelessWidget {
     required this.active,
     required this.configuredSeconds,
     required this.remainingSeconds,
+    required this.connectionStatus,
+    required this.secondsSinceLastSeen,
   });
 
   final dynamic active;
   final dynamic configuredSeconds;
   final dynamic remainingSeconds;
+  final String connectionStatus;
+  final int? secondsSinceLastSeen;
 
   @override
   Widget build(BuildContext context) {
     final isActive = active == true;
+
+    final baseSeconds = isActive
+        ? _toInt(remainingSeconds)
+        : _toInt(configuredSeconds);
+
+    final elapsed = connectionStatus == 'online'
+        ? (secondsSinceLastSeen ?? 0)
+        : 0;
+
+    final displaySeconds = isActive
+        ? (baseSeconds == null
+              ? null
+              : (baseSeconds - elapsed).clamp(0, 999999))
+        : baseSeconds;
 
     return _GlassCard(
       borderColor: const Color(0xFF00D5D5),
@@ -686,7 +865,7 @@ class _DripCard extends StatelessWidget {
           Center(
             child: _MiniMetric(
               label: isActive ? 'Restante' : 'Configurado',
-              value: isActive ? remainingSeconds : configuredSeconds,
+              value: displaySeconds,
               suffix: 's',
               color: const Color(0xFF22D3EE),
               icon: Icons.timer_rounded,
@@ -695,6 +874,13 @@ class _DripCard extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  static int? _toInt(dynamic value) {
+    if (value == null) return null;
+    if (value is int) return value;
+    if (value is double) return value.round();
+    return int.tryParse(value.toString());
   }
 }
 
@@ -906,16 +1092,28 @@ class _MiniCompressorKpi extends StatelessWidget {
     required this.relayOn,
     required this.shouldBeOn,
     required this.protectionSeconds,
+    required this.connectionStatus,
+    required this.secondsSinceLastSeen,
   });
 
   final dynamic relayOn;
   final dynamic shouldBeOn;
   final dynamic protectionSeconds;
+  final String connectionStatus;
+  final int? secondsSinceLastSeen;
 
   @override
   Widget build(BuildContext context) {
     final isOn = relayOn == true;
     const accent = Color(0xFF20D76D);
+
+    final baseSeconds = _toInt(protectionSeconds) ?? 0;
+
+    final elapsed = connectionStatus == 'online'
+        ? (secondsSinceLastSeen ?? 0)
+        : 0;
+
+    final displaySeconds = (baseSeconds - elapsed).clamp(0, 999999);
 
     return Container(
       padding: const EdgeInsets.all(8),
@@ -972,13 +1170,20 @@ class _MiniCompressorKpi extends StatelessWidget {
           Center(
             child: _TinyPill(
               icon: Icons.timer_rounded,
-              text: 'PROT. ${protectionSeconds ?? 0}s',
+              text: 'PROT. ${displaySeconds}s',
               color: accent,
             ),
           ),
         ],
       ),
     );
+  }
+
+  static int? _toInt(dynamic value) {
+    if (value == null) return null;
+    if (value is int) return value;
+    if (value is double) return value.round();
+    return int.tryParse(value.toString());
   }
 }
 

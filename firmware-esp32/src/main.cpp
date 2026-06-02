@@ -14,9 +14,15 @@ const unsigned long INTERVALO_CONFIG_MS = 60000;
 
 unsigned long ultimoIntentoWifi = 0;
 const unsigned long INTERVALO_REINTENTO_WIFI_MS = 30000;
+int cloudFailCount = 0;
+unsigned long lastCloudOkMillis = 0;
+bool cloudConnected = false;
+
+const int CLOUD_FAIL_WARNING_COUNT = 3;
+const int CLOUD_FAIL_OFFLINE_COUNT = 6;
 
 const String DEVICE_ID = "SmartCold-5494";
-const String API_BASE_URL = "http://192.168.18.8:8000";
+const String API_BASE_URL = "https://smartcold-api-649501100610.us-central1.run.app";
 
 const int PIN_ONEWIRE = 4;
 
@@ -182,7 +188,16 @@ void enviarTelemetria()
 {
   if (WiFi.status() != WL_CONNECTED)
   {
+    cloudFailCount++;
+
+    if (cloudFailCount >= CLOUD_FAIL_OFFLINE_COUNT)
+    {
+      cloudConnected = false;
+    }
+
     Serial.println("❌ WIFI NO CONECTADO");
+    Serial.print("Fallos consecutivos nube: ");
+    Serial.println(cloudFailCount);
     return;
   }
 
@@ -199,6 +214,23 @@ void enviarTelemetria()
   doc["humidity"] = 65;
   doc["rssi"] = WiFi.RSSI();
   doc["online"] = true;
+  doc["cloud_connected"] = cloudConnected;
+  doc["cloud_fail_count"] = cloudFailCount;
+  doc["last_cloud_ok_ms"] = lastCloudOkMillis;
+
+  if (cloudFailCount >= CLOUD_FAIL_OFFLINE_COUNT)
+  {
+    doc["cloud_status"] = "offline";
+  }
+  else if (cloudFailCount >= CLOUD_FAIL_WARNING_COUNT)
+  {
+    doc["cloud_status"] = "warning";
+  }
+  else
+  {
+    doc["cloud_status"] = "online";
+  }
+
   doc["device_state"] = obtenerEstadoOperativo();
   doc["device_health"] = obtenerSaludDispositivo();
   doc["device_health_reason"] = obtenerMotivoSaludDispositivo();
@@ -319,14 +351,28 @@ void enviarTelemetria()
 
   if (httpCode <= 0)
   {
+    cloudFailCount++;
+
+    if (cloudFailCount >= CLOUD_FAIL_OFFLINE_COUNT)
+    {
+      cloudConnected = false;
+    }
+
     Serial.print("ERROR HTTP: ");
     Serial.println(http.errorToString(httpCode));
+    Serial.print("Fallos consecutivos nube: ");
+    Serial.println(cloudFailCount);
+
     http.end();
     return;
   }
 
   Serial.print("HTTP CODE: ");
   Serial.println(httpCode);
+
+  cloudFailCount = 0;
+  cloudConnected = true;
+  lastCloudOkMillis = millis();
 
   String response = http.getString();
 

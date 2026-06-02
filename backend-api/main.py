@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import firebase_admin
 from firebase_admin import credentials, firestore
+import os
 
 app = FastAPI(title="SmartCold API")
 
@@ -11,8 +12,13 @@ app = FastAPI(title="SmartCold API")
 # FIREBASE
 # =====================================
 
-cred = credentials.Certificate("firebase-key.json")
-firebase_admin.initialize_app(cred)
+import os
+
+if os.getenv("K_SERVICE"):
+    firebase_admin.initialize_app()
+else:
+    cred = credentials.Certificate("firebase-key.json")
+    firebase_admin.initialize_app(cred)
 
 db = firestore.client()
 
@@ -67,6 +73,11 @@ class TelemetryData(BaseModel):
     drip_elapsed_seconds: int | None = None
     drip_remaining_seconds: int | None = None
     drip_time_seconds: int | None = None
+
+    cloud_connected: bool | None = None
+    cloud_fail_count: int | None = None
+    cloud_status: str | None = None
+    last_cloud_ok_ms: int | None = None
 
     detected_sensors: list[str] = []
     sensor_readings: Dict[str, float] = {}
@@ -230,6 +241,8 @@ def receive_telemetry(data: TelemetryData):
 
     now = datetime.now()
     now_iso = now.isoformat()
+    connection_status = "online"
+    seconds_since_last_seen = 0
 
     status_doc = db.collection("device_status").document(data.device_id).get()
     current_status = status_doc.to_dict() if status_doc.exists else {}
@@ -254,7 +267,14 @@ def receive_telemetry(data: TelemetryData):
         "temperature": data.temperature,
         "humidity": data.humidity,
         "rssi": data.rssi,
-        "online": data.online,
+        "online": True,
+        "connection_status": connection_status,
+        "seconds_since_last_seen": seconds_since_last_seen,
+        "last_seen_at": now_iso,
+        "cloud_connected": data.cloud_connected,
+        "cloud_fail_count": data.cloud_fail_count,
+        "cloud_status": data.cloud_status,
+        "last_cloud_ok_ms": data.last_cloud_ok_ms,
         "alarm": alarm,
         "alarm_reason": alarm_reason,
         "device_state": data.device_state,
@@ -291,6 +311,8 @@ def receive_telemetry(data: TelemetryData):
         **telemetry_data,
         "last_seen_at": now_iso,
         "updated_at": now_iso,
+        "connection_status": connection_status,
+        "seconds_since_last_seen": seconds_since_last_seen,
         "last_history_at": (
             now_iso if should_save_history else current_status.get("last_history_at")
         ),
@@ -642,6 +664,37 @@ def get_device_dashboard(device_id: str):
     device = device_doc.to_dict()
     status = status_doc.to_dict() if status_doc.exists else {}
     config = config_doc.to_dict() if config_doc.exists else {}
+
+    now = datetime.now()
+    last_seen_at = status.get("last_seen_at")
+
+    seconds_since_last_seen = None
+    connection_status = "offline"
+    online = False
+
+    if last_seen_at:
+        try:
+            last_seen_dt = datetime.fromisoformat(last_seen_at)
+            seconds_since_last_seen = int((now - last_seen_dt).total_seconds())
+
+            if seconds_since_last_seen <= OFFLINE_WARNING_SECONDS:
+                connection_status = "online"
+                online = True
+            elif seconds_since_last_seen <= OFFLINE_REAL_SECONDS:
+                connection_status = "warning"
+                online = True
+            else:
+                connection_status = "offline"
+                online = False
+
+        except Exception:
+            seconds_since_last_seen = None
+            connection_status = "offline"
+            online = False
+
+    status["online"] = online
+    status["connection_status"] = connection_status
+    status["seconds_since_last_seen"] = seconds_since_last_seen
 
     readings_docs = (
         db.collection("device_telemetry")
