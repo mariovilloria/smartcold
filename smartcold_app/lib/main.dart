@@ -96,12 +96,16 @@ class DeviceStatusPage extends StatefulWidget {
 class _DeviceStatusPageState extends State<DeviceStatusPage> {
   Timer? _timer;
   int? _selectedCoolingLevel;
+  int? _configCoolingLevel;
   bool _dialUnlocked = false;
   int? _levelBeforeEdit;
+  CoolingMode _configOperationMode = CoolingMode.refrigerate;
+  String? _lastConfigAckSeen;
 
   @override
   void initState() {
     super.initState();
+    _loadConfigSummary();
 
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) {
@@ -114,6 +118,32 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
   void dispose() {
     _timer?.cancel();
     super.dispose();
+  }
+
+  Future<void> _loadConfigSummary() async {
+    try {
+      final response = await http.get(
+        Uri.parse(
+          'https://smartcold-api-649501100610.us-central1.run.app/api/devices/${widget.deviceId}/config-summary',
+        ),
+      );
+
+      if (response.statusCode != 200) return;
+
+      final body = jsonDecode(response.body);
+
+      if (body['success'] != true) return;
+
+      if (!mounted) return;
+
+      setState(() {
+        _configCoolingLevel =
+            _intFromDynamic(body['cooling_level']) ?? _configCoolingLevel;
+        _configOperationMode = _coolingModeFromString(body['operation_mode']);
+      });
+    } catch (_) {
+      // Sin bloqueo visual si la API no responde.
+    }
   }
 
   @override
@@ -159,15 +189,26 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
                 );
               }
 
-              final savedCoolingLevel =
-                  _selectedCoolingLevel ?? _intFromDynamic(data['cooling_level']) ?? 4;
+              final lastConfigAckAt = data['last_config_ack_at']?.toString();
+
+              if (lastConfigAckAt != null &&
+                  lastConfigAckAt != _lastConfigAckSeen &&
+                  !_dialUnlocked) {
+                _lastConfigAckSeen = lastConfigAckAt;
+
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (mounted && !_dialUnlocked) {
+                    _loadConfigSummary();
+                  }
+                });
+              }
+
+              final savedCoolingLevel = _configCoolingLevel ?? 4;
 
               final visibleCoolingLevel =
                   _selectedCoolingLevel ?? savedCoolingLevel;
 
-              final operationMode = _coolingModeFromString(
-                data['operation_mode'],
-              );
+              final operationMode = _configOperationMode;
 
               final coolingProfile = getCoolingProfile(
                 mode: operationMode,
@@ -183,9 +224,7 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
                 data['last_seen_at'],
               );
 
-              final connectionStatus = _connectionStatus(
-                secondsSinceLastSeen,
-              );
+              final connectionStatus = _connectionStatus(secondsSinceLastSeen);
 
               final lastUpdateText = _lastUpdateText(secondsSinceLastSeen);
 
@@ -193,254 +232,239 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
               final evaporatorTemp = _sensorValue(data, 'evaporator');
 
               return Column(
-                    children: [
-                      Expanded(
-                        child: ListView(
-                          padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
-                          children: [
-                            _TopBar(
-                              connectionStatus: connectionStatus,
-                              rssi: data['rssi'],
-                            ),
-                            const SizedBox(height: 14),
+                children: [
+                  Expanded(
+                    child: ListView(
+                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
+                      children: [
+                        _TopBar(
+                          connectionStatus: connectionStatus,
+                          rssi: data['rssi'],
+                        ),
+                        const SizedBox(height: 14),
 
-                            _HeroPanel(
-                              deviceName:
-                                  data['device_name'] ??
-                                  data['name'] ??
-                                  widget.deviceId,
-                              health: data['device_health'],
-                              healthReason: data['device_health_reason'],
-                              state: data['device_state'],
-                              online: connectionStatus != 'offline',
-                              rssi: data['rssi'],
-                              compressorOn: data['compressor_relay_on'],
-                              blockReason: data['compressor_block_reason'],
-                            ),
+                        _HeroPanel(
+                          deviceName:
+                              data['device_name'] ??
+                              data['name'] ??
+                              widget.deviceId,
+                          health: data['device_health'],
+                          healthReason: data['device_health_reason'],
+                          state: data['device_state'],
+                          online: connectionStatus != 'offline',
+                          rssi: data['rssi'],
+                          compressorOn: data['compressor_relay_on'],
+                          blockReason: data['compressor_block_reason'],
+                        ),
 
-                            const SizedBox(height: 8),
+                        const SizedBox(height: 8),
 
-                            _CoolingLevelDial(
-                              level: visibleCoolingLevel,
-                              setpoint: setpoint,
-                              turnOnTemp: turnOnTemp,
-                              turnOffTemp: turnOffTemp,
-                              unlocked: _dialUnlocked,
-                              onUnlockChanged: (value) {
-                                setState(() {
-                                  if (value) {
-                                    _levelBeforeEdit = visibleCoolingLevel;
-                                    _dialUnlocked = true;
-                                    return;
+                        _CoolingLevelDial(
+                          level: visibleCoolingLevel,
+                          setpoint: setpoint,
+                          turnOnTemp: turnOnTemp,
+                          turnOffTemp: turnOffTemp,
+                          unlocked: _dialUnlocked,
+                          onUnlockChanged: (value) {
+                            setState(() {
+                              if (value) {
+                                _levelBeforeEdit = visibleCoolingLevel;
+                                _dialUnlocked = true;
+                                return;
+                              }
+
+                              _selectedCoolingLevel = null;
+                              _levelBeforeEdit = null;
+                              _dialUnlocked = false;
+                            });
+                          },
+                          onLevelChanged: (newLevel) {
+                            if (!_dialUnlocked) return;
+
+                            setState(() {
+                              _selectedCoolingLevel = newLevel;
+                            });
+                          },
+                        ),
+
+                        if (_dialUnlocked &&
+                            _selectedCoolingLevel != null &&
+                            _levelBeforeEdit != null &&
+                            _selectedCoolingLevel != _levelBeforeEdit) ...[
+                          const SizedBox(height: 8),
+                          SizedBox(
+                            width: double.infinity,
+                            child: ElevatedButton.icon(
+                              onPressed: () async {
+                                final levelToSave = _selectedCoolingLevel;
+
+                                if (levelToSave == null) return;
+
+                                try {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text('Guardando ajuste...'),
+                                      duration: Duration(seconds: 1),
+                                    ),
+                                  );
+
+                                  final response = await http.post(
+                                    Uri.parse(
+                                      'https://smartcold-api-649501100610.us-central1.run.app/api/devices/${widget.deviceId}/cooling-level',
+                                    ),
+                                    headers: {
+                                      'Content-Type': 'application/json',
+                                    },
+                                    body: jsonEncode({
+                                      'cooling_level': levelToSave,
+                                    }),
+                                  );
+
+                                  final body = jsonDecode(response.body);
+
+                                  if (response.statusCode != 200 ||
+                                      body['success'] != true) {
+                                    throw Exception(
+                                      body['message'] ??
+                                          'No se pudo guardar el ajuste',
+                                    );
                                   }
 
-                                  _selectedCoolingLevel = _levelBeforeEdit;
-                                  _levelBeforeEdit = null;
-                                  _dialUnlocked = false;
-                                });
-                              },
-                              onLevelChanged: (newLevel) {
-                                if (!_dialUnlocked) return;
+                                  if (!context.mounted) return;
 
-                                setState(() {
-                                  _selectedCoolingLevel = newLevel;
-                                });
-                              },
-                            ),
-
-                            if (_dialUnlocked &&
-                                _selectedCoolingLevel != null &&
-                                _levelBeforeEdit != null &&
-                                _selectedCoolingLevel != _levelBeforeEdit) ...[
-                              const SizedBox(height: 8),
-                              SizedBox(
-                                width: double.infinity,
-                                child: ElevatedButton.icon(
-                                  onPressed: () async {
-                                    final levelToSave = _selectedCoolingLevel;
-
-                                    if (levelToSave == null) return;
-
-                                    try {
-                                      ScaffoldMessenger.of(
-                                        context,
-                                      ).showSnackBar(
-                                        const SnackBar(
-                                          content: Text('Guardando ajuste...'),
-                                          duration: Duration(seconds: 1),
-                                        ),
-                                      );
-
-                                      final response = await http.post(
-                                        Uri.parse(
-                                          'https://smartcold-api-649501100610.us-central1.run.app/api/devices/${widget.deviceId}/cooling-level',
-                                        ),
-                                        headers: {
-                                          'Content-Type': 'application/json',
-                                        },
-                                        body: jsonEncode({
-                                          'cooling_level': levelToSave,
-                                        }),
-                                      );
-
-                                      final body = jsonDecode(response.body);
-
-                                      if (response.statusCode != 200 ||
-                                          body['success'] != true) {
-                                        throw Exception(
-                                          body['message'] ??
-                                              'No se pudo guardar el ajuste',
-                                        );
-                                      }
-
-                                      if (!context.mounted) return;
-
-                                      ScaffoldMessenger.of(
-                                        context,
-                                      ).showSnackBar(
-                                        SnackBar(
-                                          content: Text(
-                                            'Nivel $levelToSave guardado',
-                                          ),
-                                          duration: const Duration(seconds: 2),
-                                        ),
-                                      );
-                                      setState(() {
-                                        _selectedCoolingLevel = levelToSave;
-                                        _levelBeforeEdit = null;
-                                        _dialUnlocked = false;
-                                      });
-                                    } catch (e) {
-                                      if (!context.mounted) return;
-
-                                      ScaffoldMessenger.of(
-                                        context,
-                                      ).showSnackBar(
-                                        SnackBar(
-                                          content: Text('Error guardando: $e'),
-                                          duration: const Duration(seconds: 4),
-                                        ),
-                                      );
-                                    }
-                                  },
-                                  icon: const Icon(Icons.save_rounded),
-                                  label: const Text('Guardar ajuste'),
-                                ),
-                              ),
-                            ],
-
-                            const SizedBox(height: 18),
-
-                            LayoutBuilder(
-                              builder: (context, constraints) {
-                                return GridView.count(
-                                  shrinkWrap: true,
-                                  physics: const NeverScrollableScrollPhysics(),
-                                  crossAxisCount: 3,
-                                  crossAxisSpacing: 8,
-                                  mainAxisSpacing: 8,
-                                  childAspectRatio: constraints.maxWidth < 430
-                                      ? 0.95
-                                      : 1.25,
-                                  children: [
-                                    _KpiCard(
-                                      title: 'Cámara',
-                                      value: chamberTemp,
-                                      suffix: '°C',
-                                      icon: Icons.thermostat_rounded,
-                                      badgeText: _sensorAlarmText(
-                                        data,
-                                        'chamber',
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                        'Nivel $levelToSave guardado',
                                       ),
-                                      accent: const Color(0xFF1EA7FF),
+                                      duration: const Duration(seconds: 2),
                                     ),
-                                    _KpiCard(
-                                      title: 'Evaporador',
-                                      value: evaporatorTemp,
-                                      suffix: '°C',
-                                      icon: Icons.ac_unit_rounded,
-                                      badgeText: _sensorAlarmText(
-                                        data,
-                                        'evaporator',
-                                      ),
-                                      accent: const Color(0xFF21B9FF),
+                                  );
+                                  setState(() {
+                                    _configCoolingLevel = levelToSave;
+                                    _selectedCoolingLevel = null;
+                                    _levelBeforeEdit = null;
+                                    _dialUnlocked = false;
+                                  });
+                                } catch (e) {
+                                  if (!context.mounted) return;
+
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text('Error guardando: $e'),
+                                      duration: const Duration(seconds: 4),
                                     ),
-                                    _MiniCompressorKpi(
-                                      relayOn: data['compressor_relay_on'],
-                                      shouldBeOn:
-                                          data['compressor_should_be_on'],
-                                      protectionSeconds:
-                                          data['compressor_wait_seconds_remaining'],
-                                      connectionStatus: connectionStatus,
-                                      secondsSinceLastSeen:
-                                          secondsSinceLastSeen,
-                                    ),
-                                  ],
-                                );
+                                  );
+                                }
                               },
+                              icon: const Icon(Icons.save_rounded),
+                              label: const Text('Guardar ajuste'),
                             ),
-
-                            const SizedBox(height: 12),
-
-                            LayoutBuilder(
-                              builder: (context, constraints) {
-                                final defrostCard = _DefrostCard(
-                                  active: data['defrost_active'],
-                                  evaporatorTemp: evaporatorTemp,
-                                  chamberTemp: chamberTemp,
-                                  endTemperature:
-                                      data['defrost_end_temperature'],
-                                  remainingSeconds:
-                                      data['defrost_remaining_seconds'],
-                                  nextSeconds: data['defrost_next_seconds'],
-                                  durationMinutes:
-                                      data['defrost_duration_minutes'],
-                                  intervalMinutes:
-                                      data['defrost_interval_minutes'],
-                                  connectionStatus: connectionStatus,
-                                  secondsSinceLastSeen: secondsSinceLastSeen,
-                                );
-
-                                final dripCard = _DripCard(
-                                  active: data['drip_active'],
-                                  configuredSeconds: data['drip_time_seconds'],
-                                  remainingSeconds:
-                                      data['drip_remaining_seconds'],
-                                  connectionStatus: connectionStatus,
-                                  secondsSinceLastSeen: secondsSinceLastSeen,
-                                );
-
-                                return IntrinsicHeight(
-                                  child: Row(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.stretch,
-                                    children: [
-                                      Expanded(child: defrostCard),
-                                      const SizedBox(width: 8),
-                                      Expanded(child: dripCard),
-                                    ],
-                                  ),
-                                );
-                              },
-                            ),
-                          ],
-                        ),
-                      ),
-
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: Text(
-                          lastUpdateText,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: Color(0xFF9DB0C1),
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
                           ),
+                        ],
+
+                        const SizedBox(height: 18),
+
+                        LayoutBuilder(
+                          builder: (context, constraints) {
+                            return GridView.count(
+                              shrinkWrap: true,
+                              physics: const NeverScrollableScrollPhysics(),
+                              crossAxisCount: 3,
+                              crossAxisSpacing: 8,
+                              mainAxisSpacing: 8,
+                              childAspectRatio: constraints.maxWidth < 430
+                                  ? 0.95
+                                  : 1.25,
+                              children: [
+                                _KpiCard(
+                                  title: 'Cámara',
+                                  value: chamberTemp,
+                                  suffix: '°C',
+                                  icon: Icons.thermostat_rounded,
+                                  badgeText: _sensorAlarmText(data, 'chamber'),
+                                  accent: const Color(0xFF1EA7FF),
+                                ),
+                                _KpiCard(
+                                  title: 'Evaporador',
+                                  value: evaporatorTemp,
+                                  suffix: '°C',
+                                  icon: Icons.ac_unit_rounded,
+                                  badgeText: _sensorAlarmText(
+                                    data,
+                                    'evaporator',
+                                  ),
+                                  accent: const Color(0xFF21B9FF),
+                                ),
+                                _MiniCompressorKpi(
+                                  relayOn: data['compressor_relay_on'],
+                                  shouldBeOn: data['compressor_should_be_on'],
+                                  protectionSeconds:
+                                      data['compressor_wait_seconds_remaining'],
+                                  connectionStatus: connectionStatus,
+                                  secondsSinceLastSeen: secondsSinceLastSeen,
+                                ),
+                              ],
+                            );
+                          },
                         ),
+
+                        const SizedBox(height: 12),
+
+                        LayoutBuilder(
+                          builder: (context, constraints) {
+                            final defrostCard = _DefrostCard(
+                              active: data['defrost_active'],
+                              evaporatorTemp: evaporatorTemp,
+                              chamberTemp: chamberTemp,
+                              endTemperature: data['defrost_end_temperature'],
+                              remainingSeconds:
+                                  data['defrost_remaining_seconds'],
+                              nextSeconds: data['defrost_next_seconds'],
+                              durationMinutes: data['defrost_duration_minutes'],
+                              intervalMinutes: data['defrost_interval_minutes'],
+                              connectionStatus: connectionStatus,
+                              secondsSinceLastSeen: secondsSinceLastSeen,
+                            );
+
+                            final dripCard = _DripCard(
+                              active: data['drip_active'],
+                              configuredSeconds: data['drip_time_seconds'],
+                              remainingSeconds: data['drip_remaining_seconds'],
+                              connectionStatus: connectionStatus,
+                              secondsSinceLastSeen: secondsSinceLastSeen,
+                            );
+
+                            return IntrinsicHeight(
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  Expanded(child: defrostCard),
+                                  const SizedBox(width: 8),
+                                  Expanded(child: dripCard),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: Text(
+                      lastUpdateText,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: Color(0xFF9DB0C1),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
                       ),
-                    ],
-                  );
+                    ),
+                  ),
+                ],
+              );
             },
           ),
         ),

@@ -629,6 +629,41 @@ def get_device_config(device_id: str):
     return {"success": True, "config": doc.to_dict()}
 
 
+@app.get("/api/devices/{device_id}/config-summary")
+def get_device_config_summary(device_id: str):
+
+    doc = db.collection("device_config").document(device_id).get()
+
+    if not doc.exists:
+        return {
+            "success": False,
+            "message": "Device config not found",
+        }
+
+    config = doc.to_dict() or {}
+
+    compressor = config.get("compressor", {})
+    sensors = config.get("sensors", [])
+
+    chamber_sensor = next(
+        (s for s in sensors if s.get("role") == "chamber"),
+        {},
+    )
+
+    return {
+        "success": True,
+        "device_id": device_id,
+        "operation_mode": config.get("operation_mode", "refrigerate"),
+        "cooling_level": config.get("cooling_level", 4),
+        "setpoint": compressor.get("setpoint", 4),
+        "differential": compressor.get("differential", 2),
+        "temp_max_alarm": chamber_sensor.get("temp_max_alarm"),
+        "temp_min_alarm": chamber_sensor.get("temp_min_alarm"),
+        "config_pending": config.get("config_pending", False),
+        "updated_at": config.get("updated_at"),
+    }
+
+
 @app.post("/api/devices/{device_id}/config/ack")
 def ack_device_config(device_id: str):
 
@@ -638,6 +673,14 @@ def ack_device_config(device_id: str):
         {
             "config_pending": False,
             "last_config_ack_at": now_iso,
+        },
+        merge=True,
+    )
+
+    db.collection("device_status").document(device_id).set(
+        {
+            "last_config_ack_at": now_iso,
+            "config_pending": False,
         },
         merge=True,
     )
