@@ -4,55 +4,9 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'package:firebase_auth/firebase_auth.dart';
 
 import 'firebase_options.dart';
-
-enum CoolingMode { refrigerate, freeze }
-
-class CoolingProfile {
-  const CoolingProfile({
-    required this.mode,
-    required this.level,
-    required this.targetTemperature,
-  });
-
-  final CoolingMode mode;
-  final int level;
-  final double targetTemperature;
-}
-
-CoolingProfile getCoolingProfile({
-  required CoolingMode mode,
-  required int level,
-}) {
-  final safeLevel = level.clamp(1, 7);
-
-  if (mode == CoolingMode.freeze) {
-    const values = {
-      1: -12.0,
-      2: -14.0,
-      3: -16.0,
-      4: -18.0,
-      5: -20.0,
-      6: -22.0,
-      7: -24.0,
-    };
-
-    return CoolingProfile(
-      mode: mode,
-      level: safeLevel,
-      targetTemperature: values[safeLevel]!,
-    );
-  }
-
-  const values = {1: 7.0, 2: 6.0, 3: 5.0, 4: 4.0, 5: 3.0, 6: 2.0, 7: 1.0};
-
-  return CoolingProfile(
-    mode: mode,
-    level: safeLevel,
-    targetTemperature: values[safeLevel]!,
-  );
-}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -63,7 +17,7 @@ Future<void> main() async {
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
-  static const String deviceId = 'SmartCold-5494';
+  static const String deviceId = 'SmartCold-2CBB74C55494';
 
   @override
   Widget build(BuildContext context) {
@@ -79,7 +33,1390 @@ class MyApp extends StatelessWidget {
           brightness: Brightness.dark,
         ),
       ),
-      home: const DeviceStatusPage(deviceId: deviceId),
+      home: const AuthGate(),
+    );
+  }
+}
+
+class AuthGate extends StatelessWidget {
+  const AuthGate({super.key});
+
+  static const String deviceId = MyApp.deviceId;
+
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<User?>(
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, authSnapshot) {
+        if (authSnapshot.connectionState == ConnectionState.waiting) {
+          return const Scaffold(
+            backgroundColor: Color(0xFF020B14),
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
+
+        final user = authSnapshot.data;
+        debugPrint('AUTH UID: ${user?.uid}');
+        debugPrint('AUTH EMAIL: ${user?.email}');
+        if (user == null) {
+          return const LoginPage();
+        }
+
+        return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          future: FirebaseFirestore.instance
+              .collection('users')
+              .doc(user.uid)
+              .get(),
+          builder: (context, userSnapshot) {
+            if (userSnapshot.connectionState == ConnectionState.waiting) {
+              return const Scaffold(
+                backgroundColor: Color(0xFF020B14),
+                body: Center(child: CircularProgressIndicator()),
+              );
+            }
+            debugPrint('USER DOC EXISTS: ${userSnapshot.data?.exists}');
+            debugPrint('USER DOC DATA: ${userSnapshot.data?.data()}');
+            if (!userSnapshot.hasData || !userSnapshot.data!.exists) {
+              return const AccessDeniedPage(message: 'Usuario no autorizado.');
+            }
+
+            final userData = userSnapshot.data!.data() ?? {};
+            final active = userData['active'] == true;
+
+            if (!active) {
+              return const AccessDeniedPage(message: 'Usuario inactivo.');
+            }
+
+            return DevicesPage(userData: userData);
+          },
+        );
+      },
+    );
+  }
+}
+
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class AccessDeniedPage extends StatelessWidget {
+  const AccessDeniedPage({super.key, required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF020B14),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(22),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.lock_rounded, color: Colors.redAccent, size: 54),
+              const SizedBox(height: 16),
+              Text(
+                message,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 20,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 18),
+              ElevatedButton.icon(
+                onPressed: () async {
+                  await FirebaseAuth.instance.signOut();
+                },
+                icon: const Icon(Icons.logout_rounded),
+                label: const Text('Cerrar sesión'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class DevicesPage extends StatefulWidget {
+  const DevicesPage({super.key, required this.userData});
+
+  final Map<String, dynamic> userData;
+
+  @override
+  State<DevicesPage> createState() => _DevicesPageState();
+}
+
+class _DevicesPageState extends State<DevicesPage> {
+  String? _selectedClientId;
+  String? _selectedStoreId;
+
+  @override
+  Widget build(BuildContext context) {
+    final role = widget.userData['role']?.toString() ?? 'client';
+    final clientId = widget.userData['client_id']?.toString();
+
+    Query<Map<String, dynamic>> devicesQuery = FirebaseFirestore.instance
+        .collection('devices')
+        .where('active', isEqualTo: true);
+
+    if (role == 'client') {
+      if (clientId == null || clientId.isEmpty) {
+        return const AccessDeniedPage(
+          message: 'Este usuario no tiene cliente asociado.',
+        );
+      }
+
+      devicesQuery = devicesQuery.where(
+        'current_client_id',
+        isEqualTo: clientId,
+      );
+    }
+
+    if (role == 'admin' && _selectedClientId != null) {
+      devicesQuery = devicesQuery.where(
+        'current_client_id',
+        isEqualTo: _selectedClientId,
+      );
+    }
+    if (role == 'admin' && _selectedStoreId != null) {
+      devicesQuery = devicesQuery.where(
+        'current_store_id',
+        isEqualTo: _selectedStoreId,
+      );
+    }
+    return Scaffold(
+      backgroundColor: const Color(0xFF020B14),
+      body: SafeArea(
+        child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: devicesQuery.snapshots(),
+          builder: (context, snapshot) {
+            if (snapshot.hasError) {
+              return Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Text(
+                    'Error cargando equipos:\n${snapshot.error}',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                ),
+              );
+            }
+
+            if (!snapshot.hasData) {
+              return const Center(child: CircularProgressIndicator());
+            }
+
+            final devices = snapshot.data!.docs;
+
+            final clientFilter = role == 'admin'
+                ? _ClientFilterSelector(
+                    selectedClientId: _selectedClientId,
+                    onChanged: (value) {
+                      setState(() {
+                        _selectedClientId = value;
+                        _selectedStoreId = null;
+                      });
+                    },
+                  )
+                : const SizedBox.shrink();
+            final storeFilter = role == 'admin'
+                ? _StoreFilterSelector(
+                    selectedStoreId: _selectedStoreId,
+                    selectedClientId: _selectedClientId,
+                    onChanged: (value) async {
+                      if (value == null) {
+                        setState(() {
+                          _selectedStoreId = null;
+                        });
+                        return;
+                      }
+
+                      final storeDoc = await FirebaseFirestore.instance
+                          .collection('stores')
+                          .doc(value)
+                          .get();
+
+                      final storeData = storeDoc.data();
+                      final storeClientId = storeData?['client_id']?.toString();
+
+                      setState(() {
+                        _selectedStoreId = value;
+
+                        if (storeClientId != null && storeClientId.isNotEmpty) {
+                          _selectedClientId = storeClientId;
+                        }
+                      });
+                    },
+                  )
+                : const SizedBox.shrink();
+            if (devices.isEmpty) {
+              return ListView(
+                padding: const EdgeInsets.all(16),
+                children: [
+                  _DevicesHeader(totalDevices: 0, role: role),
+                  clientFilter,
+                  storeFilter,
+                  const SizedBox(height: 18),
+                  const Center(
+                    child: Padding(
+                      padding: EdgeInsets.only(top: 40),
+                      child: Text(
+                        'No hay equipos asociados todavía.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Color(0xFF9DB0C1),
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            }
+
+            return ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                _DevicesHeader(totalDevices: devices.length, role: role),
+                clientFilter,
+                storeFilter,
+                const SizedBox(height: 16),
+
+                ...devices.map((doc) {
+                  final deviceData = doc.data();
+
+                  return _DeviceSummaryCard(
+                    deviceId: doc.id,
+                    deviceData: deviceData,
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => DeviceStatusPage(deviceId: doc.id),
+                        ),
+                      );
+                    },
+                  );
+                }),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _ClientFilterSelector extends StatelessWidget {
+  const _ClientFilterSelector({
+    required this.selectedClientId,
+    required this.onChanged,
+  });
+
+  final String? selectedClientId;
+  final ValueChanged<String?> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    if (selectedClientId == null) {
+      return _FilterPickerTile(
+        icon: Icons.business_rounded,
+        label: 'Cliente',
+        valueText: 'Todos los clientes',
+        onTap: () async {
+          final selected = await showModalBottomSheet<String?>(
+            context: context,
+            isScrollControlled: true,
+            backgroundColor: const Color(0xFF020B14),
+            builder: (context) {
+              return _ClientSearchSheet(selectedClientId: selectedClientId);
+            },
+          );
+
+          onChanged(selected);
+        },
+      );
+    }
+
+    final clientRef = FirebaseFirestore.instance
+        .collection('clients')
+        .doc(selectedClientId);
+
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: clientRef.snapshots(),
+      builder: (context, snapshot) {
+        final data = snapshot.data?.data();
+        final clientName = data?['name']?.toString() ?? 'Cliente seleccionado';
+
+        return _FilterPickerTile(
+          icon: Icons.business_rounded,
+          label: 'Cliente',
+          valueText: clientName,
+          onTap: () async {
+            final selected = await showModalBottomSheet<String?>(
+              context: context,
+              isScrollControlled: true,
+              backgroundColor: const Color(0xFF020B14),
+              builder: (context) {
+                return _ClientSearchSheet(selectedClientId: selectedClientId);
+              },
+            );
+
+            onChanged(selected);
+          },
+        );
+      },
+    );
+  }
+}
+
+class _FilterPickerTile extends StatelessWidget {
+  const _FilterPickerTile({
+    required this.icon,
+    required this.label,
+    required this.valueText,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final String valueText;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      color: const Color(0xFF061A2E),
+      margin: const EdgeInsets.only(top: 12),
+      child: ListTile(
+        onTap: onTap,
+        leading: Icon(icon, color: const Color(0xFF00A8FF)),
+        title: Text(label, style: const TextStyle(color: Color(0xFF9DB0C1))),
+        subtitle: Text(
+          valueText,
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        trailing: const Icon(
+          Icons.keyboard_arrow_down_rounded,
+          color: Colors.white,
+        ),
+      ),
+    );
+  }
+}
+
+class _ClientSearchSheet extends StatefulWidget {
+  const _ClientSearchSheet({required this.selectedClientId});
+
+  final String? selectedClientId;
+
+  @override
+  State<_ClientSearchSheet> createState() => _ClientSearchSheetState();
+}
+
+class _ClientSearchSheetState extends State<_ClientSearchSheet> {
+  String _searchText = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final clientsQuery = FirebaseFirestore.instance
+        .collection('clients')
+        .where('active', isEqualTo: true);
+
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: 16,
+          right: 16,
+          top: 16,
+          bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+        ),
+        child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: clientsQuery.snapshots(),
+          builder: (context, snapshot) {
+            final clients = snapshot.data?.docs ?? [];
+
+            final filteredClients = clients.where((doc) {
+              final data = doc.data();
+              final name = data['name']?.toString().toLowerCase() ?? '';
+              return name.contains(_searchText.toLowerCase());
+            }).toList();
+
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Seleccionar cliente',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                TextField(
+                  onChanged: (value) {
+                    setState(() {
+                      _searchText = value.trim();
+                    });
+                  },
+                  decoration: const InputDecoration(
+                    hintText: 'Buscar cliente...',
+                    prefixIcon: Icon(Icons.search_rounded),
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Flexible(
+                  child: ListView(
+                    shrinkWrap: true,
+                    children: [
+                      ListTile(
+                        leading: Icon(
+                          widget.selectedClientId == null
+                              ? Icons.check_circle_rounded
+                              : Icons.all_inclusive_rounded,
+                          color: const Color(0xFF00A8FF),
+                        ),
+                        title: const Text(
+                          'Todos los clientes',
+                          style: TextStyle(color: Colors.white),
+                        ),
+                        onTap: () {
+                          Navigator.pop(context, null);
+                        },
+                      ),
+                      ...filteredClients.map((doc) {
+                        final data = doc.data();
+                        final name =
+                            data['name']?.toString() ?? 'Cliente sin nombre';
+
+                        return ListTile(
+                          leading: Icon(
+                            doc.id == widget.selectedClientId
+                                ? Icons.check_circle_rounded
+                                : Icons.business_rounded,
+                            color: const Color(0xFF00A8FF),
+                          ),
+                          title: Text(
+                            name,
+                            style: const TextStyle(color: Colors.white),
+                          ),
+                          onTap: () {
+                            Navigator.pop(context, doc.id);
+                          },
+                        );
+                      }),
+                    ],
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _StoreFilterSelector extends StatelessWidget {
+  const _StoreFilterSelector({
+    required this.selectedStoreId,
+    required this.selectedClientId,
+    required this.onChanged,
+  });
+
+  final String? selectedStoreId;
+  final String? selectedClientId;
+  final ValueChanged<String?> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    if (selectedStoreId == null) {
+      return _FilterPickerTile(
+        icon: Icons.storefront_rounded,
+        label: 'Local',
+        valueText: 'Todos los locales',
+        onTap: () async {
+          final selected = await showModalBottomSheet<String?>(
+            context: context,
+            isScrollControlled: true,
+            backgroundColor: const Color(0xFF020B14),
+            builder: (context) {
+              return _StoreSearchSheet(
+                selectedStoreId: selectedStoreId,
+                selectedClientId: selectedClientId,
+              );
+            },
+          );
+
+          onChanged(selected);
+        },
+      );
+    }
+
+    final storeRef = FirebaseFirestore.instance
+        .collection('stores')
+        .doc(selectedStoreId);
+
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: storeRef.snapshots(),
+      builder: (context, snapshot) {
+        final data = snapshot.data?.data();
+        final storeName = data?['name']?.toString() ?? 'Local seleccionado';
+
+        return _FilterPickerTile(
+          icon: Icons.storefront_rounded,
+          label: 'Local',
+          valueText: storeName,
+          onTap: () async {
+            final selected = await showModalBottomSheet<String?>(
+              context: context,
+              isScrollControlled: true,
+              backgroundColor: const Color(0xFF020B14),
+              builder: (context) {
+                return _StoreSearchSheet(
+                  selectedStoreId: selectedStoreId,
+                  selectedClientId: selectedClientId,
+                );
+              },
+            );
+
+            onChanged(selected);
+          },
+        );
+      },
+    );
+  }
+}
+
+class _StoreSearchSheet extends StatefulWidget {
+  const _StoreSearchSheet({
+    required this.selectedStoreId,
+    required this.selectedClientId,
+  });
+
+  final String? selectedStoreId;
+  final String? selectedClientId;
+
+  @override
+  State<_StoreSearchSheet> createState() => _StoreSearchSheetState();
+}
+
+class _StoreSearchSheetState extends State<_StoreSearchSheet> {
+  String _searchText = '';
+
+  @override
+  Widget build(BuildContext context) {
+    Query<Map<String, dynamic>> storesQuery = FirebaseFirestore.instance
+        .collection('stores')
+        .where('active', isEqualTo: true);
+
+    if (widget.selectedClientId != null) {
+      storesQuery = storesQuery.where(
+        'client_id',
+        isEqualTo: widget.selectedClientId,
+      );
+    }
+
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: 16,
+          right: 16,
+          top: 16,
+          bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+        ),
+        child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: storesQuery.snapshots(),
+          builder: (context, snapshot) {
+            final stores = snapshot.data?.docs ?? [];
+
+            final filteredStores = stores.where((doc) {
+              final data = doc.data();
+              final name = data['name']?.toString().toLowerCase() ?? '';
+              return name.contains(_searchText.toLowerCase());
+            }).toList();
+
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Seleccionar local',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                TextField(
+                  onChanged: (value) {
+                    setState(() {
+                      _searchText = value.trim();
+                    });
+                  },
+                  decoration: const InputDecoration(
+                    hintText: 'Buscar local...',
+                    prefixIcon: Icon(Icons.search_rounded),
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Flexible(
+                  child: ListView(
+                    shrinkWrap: true,
+                    children: [
+                      ListTile(
+                        leading: Icon(
+                          widget.selectedStoreId == null
+                              ? Icons.check_circle_rounded
+                              : Icons.all_inclusive_rounded,
+                          color: const Color(0xFF00A8FF),
+                        ),
+                        title: const Text(
+                          'Todos los locales',
+                          style: TextStyle(color: Colors.white),
+                        ),
+                        onTap: () {
+                          Navigator.pop(context, null);
+                        },
+                      ),
+                      ...filteredStores.map((doc) {
+                        final data = doc.data();
+                        final name =
+                            data['name']?.toString() ?? 'Local sin nombre';
+
+                        return ListTile(
+                          leading: Icon(
+                            doc.id == widget.selectedStoreId
+                                ? Icons.check_circle_rounded
+                                : Icons.storefront_rounded,
+                            color: const Color(0xFF00A8FF),
+                          ),
+                          title: Text(
+                            name,
+                            style: const TextStyle(color: Colors.white),
+                          ),
+                          onTap: () {
+                            Navigator.pop(context, doc.id);
+                          },
+                        );
+                      }),
+                    ],
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _DevicesHeader extends StatelessWidget {
+  const _DevicesHeader({required this.totalDevices, required this.role});
+
+  final int totalDevices;
+  final String role;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 14),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(24),
+        gradient: const LinearGradient(
+          colors: [Color(0xFF061A2E), Color(0xFF082B49)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        border: Border.all(color: const Color(0xFF00A8FF)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.ac_unit_rounded,
+                color: Color(0xFF00A8FF),
+                size: 34,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  role == 'admin' ? 'Equipos' : 'Mis equipos',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 25,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+              PopupMenuButton<String>(
+                icon: const Icon(Icons.menu_rounded, color: Color(0xFF9DB0C1)),
+                color: const Color(0xFF061A2E),
+                onSelected: (value) async {
+                  if (value == 'clients') {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const ClientsPage()),
+                    );
+                    return;
+                  }
+                  if (value == 'account') {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => const AccountPage()),
+                    );
+                    return;
+                  }
+
+                  if (value == 'logout') {
+                    final confirmar = await showDialog<bool>(
+                      context: context,
+                      builder: (context) {
+                        return AlertDialog(
+                          title: const Text('Cerrar sesión'),
+                          content: const Text(
+                            '¿Deseas cerrar la sesión actual?',
+                          ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(context, false),
+                              child: const Text('Cancelar'),
+                            ),
+                            ElevatedButton(
+                              onPressed: () => Navigator.pop(context, true),
+                              child: const Text('Cerrar sesión'),
+                            ),
+                          ],
+                        );
+                      },
+                    );
+
+                    if (confirmar == true) {
+                      await FirebaseAuth.instance.signOut();
+                    }
+                  }
+                },
+                itemBuilder: (context) => [
+                  if (role == 'admin')
+                    const PopupMenuItem(
+                      value: 'clients',
+                      child: Text('Clientes'),
+                    ),
+                  const PopupMenuItem(
+                    value: 'account',
+                    child: Text('Mi cuenta'),
+                  ),
+                  const PopupMenuItem(
+                    value: 'logout',
+                    child: Text('Cerrar sesión'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Text(
+            role == 'admin'
+                ? '$totalDevices equipo${totalDevices == 1 ? '' : 's'} visible${totalDevices == 1 ? '' : 's'}'
+                : '$totalDevices equipo${totalDevices == 1 ? '' : 's'} asociado${totalDevices == 1 ? '' : 's'}',
+            style: const TextStyle(
+              color: Color(0xFFB6C7D6),
+              fontSize: 14,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 10),
+          const Text(
+            'Vista rápida del estado general de tus equipos.',
+            style: TextStyle(color: Color(0xFF8DA1B2), fontSize: 13),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class AccountPage extends StatelessWidget {
+  const AccountPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final user = FirebaseAuth.instance.currentUser;
+
+    if (user == null) {
+      return const Scaffold(
+        backgroundColor: Color(0xFF020B14),
+        body: Center(
+          child: Text(
+            'No hay sesión activa',
+            style: TextStyle(color: Colors.white),
+          ),
+        ),
+      );
+    }
+
+    final userRef = FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid);
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF020B14),
+      body: SafeArea(
+        child: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+          stream: userRef.snapshots(),
+          builder: (context, snapshot) {
+            final data = snapshot.data?.data() ?? {};
+
+            final email = data['email']?.toString() ?? user.email ?? '—';
+            final role = data['role']?.toString() ?? '—';
+            final clientId = data['client_id']?.toString() ?? '—';
+
+            return ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                Row(
+                  children: [
+                    IconButton(
+                      tooltip: 'Volver',
+                      icon: const Icon(
+                        Icons.arrow_back_rounded,
+                        color: Colors.white,
+                      ),
+                      onPressed: () => Navigator.pop(context),
+                    ),
+                    const SizedBox(width: 8),
+                    const Text(
+                      'Mi cuenta',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 25,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                _AccountInfoTile(
+                  icon: Icons.email_rounded,
+                  title: 'Correo',
+                  value: email,
+                ),
+                _AccountInfoTile(
+                  icon: Icons.verified_user_rounded,
+                  title: 'Rol',
+                  value: role,
+                ),
+                _AccountInfoTile(
+                  icon: Icons.business_rounded,
+                  title: 'Cliente asociado',
+                  value: clientId,
+                ),
+                const SizedBox(height: 18),
+                ElevatedButton.icon(
+                  onPressed: () async {
+                    if (user.email == null) return;
+
+                    await FirebaseAuth.instance.sendPasswordResetEmail(
+                      email: user.email!,
+                    );
+
+                    if (!context.mounted) return;
+
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'Te enviamos un correo para cambiar tu contraseña',
+                        ),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.lock_reset_rounded),
+                  label: const Text('Cambiar contraseña'),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _AccountInfoTile extends StatelessWidget {
+  const _AccountInfoTile({
+    required this.icon,
+    required this.title,
+    required this.value,
+  });
+
+  final IconData icon;
+  final String title;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      color: const Color(0xFF061A2E),
+      child: ListTile(
+        leading: Icon(icon, color: const Color(0xFF00A8FF)),
+        title: Text(title, style: const TextStyle(color: Color(0xFF9DB0C1))),
+        subtitle: Text(
+          value,
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DeviceSummaryCard extends StatelessWidget {
+  const _DeviceSummaryCard({
+    required this.deviceId,
+    required this.deviceData,
+    required this.onTap,
+  });
+
+  final String deviceId;
+  final Map<String, dynamic> deviceData;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final statusRef = FirebaseFirestore.instance
+        .collection('device_status')
+        .doc(deviceId);
+
+    final name = deviceData['name']?.toString() ?? deviceId;
+    final type = deviceData['type']?.toString() ?? 'Equipo';
+    final storeName =
+        deviceData['store_name']?.toString() ??
+        deviceData['current_store_id']?.toString() ??
+        'Tienda sin nombre';
+
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: statusRef.snapshots(),
+      builder: (context, snapshot) {
+        final statusData = snapshot.data?.data();
+
+        final state = statusData?['device_state']?.toString() ?? 'SIN DATOS';
+        final health = statusData?['device_health']?.toString() ?? 'UNKNOWN';
+        final healthReason =
+            statusData?['device_health_reason']?.toString() ?? '';
+        final chamberTemp = _readSensor(statusData, 'chamber');
+        final seconds = _secondsSinceLastSeen(statusData?['last_seen_at']);
+        final connection = _connectionStatus(seconds);
+
+        final isOffline = connection == 'offline';
+        final hasWarning = health == 'WARNING' || health == 'ERROR';
+
+        final color = isOffline
+            ? Colors.redAccent
+            : hasWarning
+            ? Colors.orangeAccent
+            : const Color(0xFF20D76D);
+
+        return Card(
+          color: const Color(0xFF061A2E),
+          margin: const EdgeInsets.only(bottom: 12),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+            side: BorderSide(color: color.withValues(alpha: 0.85)),
+          ),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(20),
+            onTap: onTap,
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        width: 42,
+                        height: 42,
+                        decoration: BoxDecoration(
+                          color: color.withValues(alpha: 0.14),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: Icon(Icons.kitchen_rounded, color: color),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 17,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              '$storeName · $type',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Color(0xFF9DB0C1),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Icon(
+                        Icons.chevron_right_rounded,
+                        color: Colors.white,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _SmallStatusBox(
+                          label: 'Temp.',
+                          value: chamberTemp == null
+                              ? '—'
+                              : '${chamberTemp.toStringAsFixed(1)}°C',
+                          color: color,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _SmallStatusBox(
+                          label: 'Estado',
+                          value: _stateLabel(state),
+                          color: color,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: _SmallStatusBox(
+                          label: 'Conexión',
+                          value: _connectionLabel(connection),
+                          color: color,
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (hasWarning || isOffline) ...[
+                    const SizedBox(height: 10),
+                    Text(
+                      isOffline
+                          ? 'Equipo sin actualización reciente'
+                          : _healthReasonLabel(healthReason),
+                      style: TextStyle(
+                        color: color,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  static double? _readSensor(Map<String, dynamic>? data, String role) {
+    final readings = data?['sensor_readings'];
+    if (readings is Map && readings[role] is num) {
+      return (readings[role] as num).toDouble();
+    }
+    return null;
+  }
+
+  static int? _secondsSinceLastSeen(dynamic value) {
+    if (value == null) return null;
+
+    DateTime? lastSeenUtc;
+
+    if (value is Timestamp) {
+      lastSeenUtc = value.toDate().toUtc();
+    } else if (value is String) {
+      final parsed = DateTime.tryParse(value);
+      if (parsed != null) {
+        lastSeenUtc = DateTime.utc(
+          parsed.year,
+          parsed.month,
+          parsed.day,
+          parsed.hour,
+          parsed.minute,
+          parsed.second,
+          parsed.millisecond,
+          parsed.microsecond,
+        );
+      }
+    }
+
+    if (lastSeenUtc == null) return null;
+
+    final seconds = DateTime.now().toUtc().difference(lastSeenUtc).inSeconds;
+    return seconds < 0 ? 0 : seconds;
+  }
+
+  static String _connectionStatus(int? seconds) {
+    if (seconds == null) return 'offline';
+    if (seconds <= 30) return 'online';
+    if (seconds <= 90) return 'warning';
+    return 'offline';
+  }
+
+  static String _connectionLabel(String value) {
+    if (value == 'online') return 'ONLINE';
+    if (value == 'warning') return 'LENTO';
+    return 'OFFLINE';
+  }
+
+  static String _stateLabel(String value) {
+    if (value == 'COOLING') return 'ENFRÍA';
+    if (value == 'PROTECTION') return 'PROT.';
+    if (value == 'DEFROST') return 'DEFROST';
+    if (value == 'DRIP') return 'GOTEO';
+    if (value == 'IDLE') return 'ESPERA';
+    return '—';
+  }
+
+  static String _healthReasonLabel(String value) {
+    if (value == 'HIGH_TEMP') return 'Alerta: temperatura alta';
+    if (value == 'LOW_TEMP') return 'Alerta: temperatura baja';
+    if (value == 'SENSOR_ERROR') return 'Alerta: falla de sensor';
+    return 'Equipo con alerta';
+  }
+}
+
+class _SmallStatusBox extends StatelessWidget {
+  const _SmallStatusBox({
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  final String label;
+  final String value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 9, horizontal: 8),
+      decoration: BoxDecoration(
+        color: const Color(0xFF020B14),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: color.withValues(alpha: 0.35)),
+      ),
+      child: Column(
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              color: Color(0xFF8DA1B2),
+              fontSize: 10,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            value,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: color,
+              fontSize: 13,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _LoginPageState extends State<LoginPage> {
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
+
+  bool _loading = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _login() async {
+    final email = _emailController.text.trim();
+    final password = _passwordController.text.trim();
+
+    if (email.isEmpty || password.isEmpty) {
+      setState(() {
+        _error = 'Ingresa correo y contraseña';
+      });
+      return;
+    }
+
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+
+    try {
+      await FirebaseAuth.instance.signInWithEmailAndPassword(
+        email: email,
+        password: password,
+      );
+    } on FirebaseAuthException catch (e) {
+      setState(() {
+        _error = e.message ?? 'No se pudo iniciar sesión';
+      });
+    } catch (_) {
+      setState(() {
+        _error = 'Error inesperado iniciando sesión';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF020B14),
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(22),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Container(
+                padding: const EdgeInsets.all(22),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF061A2E),
+                  borderRadius: BorderRadius.circular(26),
+                  border: Border.all(color: const Color(0xFF00A8FF)),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.ac_unit_rounded,
+                      color: Color(0xFF00A8FF),
+                      size: 54,
+                    ),
+                    const SizedBox(height: 12),
+                    const Text.rich(
+                      TextSpan(
+                        children: [
+                          TextSpan(
+                            text: 'SMART',
+                            style: TextStyle(color: Colors.white),
+                          ),
+                          TextSpan(
+                            text: 'COLD',
+                            style: TextStyle(color: Color(0xFF00A8FF)),
+                          ),
+                        ],
+                      ),
+                      style: TextStyle(
+                        fontSize: 28,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    TextField(
+                      controller: _emailController,
+                      keyboardType: TextInputType.emailAddress,
+                      textInputAction: TextInputAction.next,
+                      decoration: const InputDecoration(
+                        labelText: 'Correo',
+                        prefixIcon: Icon(Icons.email_rounded),
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    TextField(
+                      controller: _passwordController,
+                      obscureText: true,
+                      onSubmitted: (_) => _login(),
+                      decoration: const InputDecoration(
+                        labelText: 'Contraseña',
+                        prefixIcon: Icon(Icons.lock_rounded),
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    if (_error != null) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        _error!,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: Colors.redAccent),
+                      ),
+                    ],
+                    const SizedBox(height: 18),
+                    SizedBox(
+                      width: double.infinity,
+                      height: 48,
+                      child: ElevatedButton.icon(
+                        onPressed: _loading ? null : _login,
+                        icon: _loading
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.login_rounded),
+                        label: Text(
+                          _loading ? 'Ingresando...' : 'Iniciar sesión',
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -97,9 +1434,12 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
   Timer? _timer;
   int? _selectedCoolingLevel;
   int? _configCoolingLevel;
+  bool _configSummaryLoaded = false;
   bool _dialUnlocked = false;
   int? _levelBeforeEdit;
-  CoolingMode _configOperationMode = CoolingMode.refrigerate;
+  double? _configSetpoint;
+  double? _configTurnOnTemp;
+  double? _configTurnOffTemp;
   String? _lastConfigAckSeen;
 
   @override
@@ -120,7 +1460,7 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
     super.dispose();
   }
 
-  Future<void> _loadConfigSummary() async {
+  Future<void> _loadConfigSummary({bool lockDial = false}) async {
     try {
       final response = await http.get(
         Uri.parse(
@@ -139,7 +1479,23 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
       setState(() {
         _configCoolingLevel =
             _intFromDynamic(body['cooling_level']) ?? _configCoolingLevel;
-        _configOperationMode = _coolingModeFromString(body['operation_mode']);
+
+        _configSetpoint =
+            _doubleFromDynamic(body['setpoint']) ?? _configSetpoint;
+
+        _configTurnOnTemp =
+            _doubleFromDynamic(body['turn_on_temperature']) ??
+            _configTurnOnTemp;
+
+        _configTurnOffTemp =
+            _doubleFromDynamic(body['turn_off_temperature']) ??
+            _configTurnOffTemp;
+        if (lockDial) {
+          _selectedCoolingLevel = null;
+          _levelBeforeEdit = null;
+          _dialUnlocked = false;
+        }
+        _configSummaryLoaded = true;
       });
     } catch (_) {
       // Sin bloqueo visual si la API no responde.
@@ -191,34 +1547,28 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
 
               final lastConfigAckAt = data['last_config_ack_at']?.toString();
 
-              if (lastConfigAckAt != null &&
-                  lastConfigAckAt != _lastConfigAckSeen &&
-                  !_dialUnlocked) {
-                _lastConfigAckSeen = lastConfigAckAt;
+              if (lastConfigAckAt != null) {
+                if (_lastConfigAckSeen == null) {
+                  _lastConfigAckSeen = lastConfigAckAt;
+                } else if (lastConfigAckAt != _lastConfigAckSeen) {
+                  _lastConfigAckSeen = lastConfigAckAt;
 
-                WidgetsBinding.instance.addPostFrameCallback((_) {
-                  if (mounted && !_dialUnlocked) {
-                    _loadConfigSummary();
-                  }
-                });
+                  WidgetsBinding.instance.addPostFrameCallback((_) async {
+                    if (!mounted) return;
+                    await _loadConfigSummary(lockDial: true);
+                  });
+                }
               }
-
+              if (!_configSummaryLoaded) {
+                return const Center(child: CircularProgressIndicator());
+              }
               final savedCoolingLevel = _configCoolingLevel ?? 4;
-
               final visibleCoolingLevel =
                   _selectedCoolingLevel ?? savedCoolingLevel;
 
-              final operationMode = _configOperationMode;
-
-              final coolingProfile = getCoolingProfile(
-                mode: operationMode,
-                level: visibleCoolingLevel,
-              );
-
-              final setpoint = coolingProfile.targetTemperature;
-              const differential = 2.0;
-              final turnOnTemp = setpoint + differential;
-              final turnOffTemp = setpoint;
+              final setpoint = _configSetpoint ?? 0.0;
+              final turnOnTemp = _configTurnOnTemp ?? 0.0;
+              final turnOffTemp = _configTurnOffTemp ?? 0.0;
 
               final secondsSinceLastSeen = _secondsSinceLastSeen(
                 data['last_seen_at'],
@@ -273,7 +1623,7 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
                                 return;
                               }
 
-                              _selectedCoolingLevel = null;
+                              _selectedCoolingLevel = _levelBeforeEdit;
                               _levelBeforeEdit = null;
                               _dialUnlocked = false;
                             });
@@ -341,11 +1691,34 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
                                     ),
                                   );
                                   setState(() {
-                                    _configCoolingLevel = levelToSave;
+                                    _configCoolingLevel =
+                                        _intFromDynamic(
+                                          body['cooling_level'],
+                                        ) ??
+                                        levelToSave;
+
+                                    _configSetpoint =
+                                        _doubleFromDynamic(body['setpoint']) ??
+                                        _configSetpoint;
+
+                                    _configTurnOnTemp =
+                                        _doubleFromDynamic(
+                                          body['turn_on_temperature'],
+                                        ) ??
+                                        _configTurnOnTemp;
+
+                                    _configTurnOffTemp =
+                                        _doubleFromDynamic(
+                                          body['turn_off_temperature'],
+                                        ) ??
+                                        _configTurnOffTemp;
+
                                     _selectedCoolingLevel = null;
                                     _levelBeforeEdit = null;
                                     _dialUnlocked = false;
                                   });
+
+                                  await _loadConfigSummary();
                                 } catch (e) {
                                   if (!context.mounted) return;
 
@@ -541,12 +1914,12 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
     return int.tryParse(value.toString());
   }
 
-  static CoolingMode _coolingModeFromString(dynamic value) {
-    if (value?.toString() == 'freeze') {
-      return CoolingMode.freeze;
-    }
-
-    return CoolingMode.refrigerate;
+  static double? _doubleFromDynamic(dynamic value) {
+    if (value == null) return null;
+    if (value is double) return value;
+    if (value is int) return value.toDouble();
+    if (value is num) return value.toDouble();
+    return double.tryParse(value.toString());
   }
 
   static dynamic _sensorValue(Map<String, dynamic> data, String role) {
@@ -598,7 +1971,17 @@ class _TopBar extends StatelessWidget {
 
     return Row(
       children: [
-        const Icon(Icons.menu_rounded, color: Colors.white, size: 32),
+        IconButton(
+          tooltip: 'Volver a equipos',
+          icon: const Icon(
+            Icons.arrow_back_rounded,
+            color: Colors.white,
+            size: 30,
+          ),
+          onPressed: () {
+            Navigator.of(context).pop();
+          },
+        ),
         const SizedBox(width: 14),
         Container(
           width: 42,
@@ -917,13 +2300,13 @@ class _CoolingLevelDialState extends State<_CoolingLevelDial> {
     const accent = Color(0xFF00A8FF);
 
     return SizedBox(
-      height: 104,
+      height: 112,
       width: double.infinity,
       child: Stack(
         alignment: Alignment.center,
         children: [
           Positioned.fill(
-            top: 20,
+            top: 0,
             child: CustomPaint(painter: _EmbeddedDialPainter()),
           ),
 
@@ -989,7 +2372,7 @@ class _CoolingLevelDialState extends State<_CoolingLevelDial> {
           ),
 
           Positioned(
-            top: 24,
+            top: 23,
             left: 0,
             right: 0,
             height: 62,
@@ -1020,19 +2403,22 @@ class _CoolingLevelDialState extends State<_CoolingLevelDial> {
                     final scale = selected ? 1.65 : 1.0 - (distance * 0.12);
                     final opacity = selected ? 1.0 : (0.72 - distance * 0.16);
 
-                    return Center(
-                      child: Transform.scale(
-                        scale: scale.clamp(0.68, 1.65),
-                        child: Text(
-                          '$number',
-                          style: TextStyle(
-                            color: selected
-                                ? Colors.white
-                                : Colors.white.withValues(
-                                    alpha: opacity.clamp(0.22, 0.72),
-                                  ),
-                            fontSize: selected ? 31 : 21,
-                            fontWeight: FontWeight.w900,
+                    return Transform.translate(
+                      offset: const Offset(0, -4),
+                      child: Center(
+                        child: Transform.scale(
+                          scale: scale.clamp(0.68, 1.65),
+                          child: Text(
+                            '$number',
+                            style: TextStyle(
+                              color: selected
+                                  ? Colors.white
+                                  : Colors.white.withValues(
+                                      alpha: opacity.clamp(0.22, 0.72),
+                                    ),
+                              fontSize: selected ? 31 : 21,
+                              fontWeight: FontWeight.w900,
+                            ),
                           ),
                         ),
                       ),
@@ -1070,7 +2456,7 @@ class _CoolingLevelDialState extends State<_CoolingLevelDial> {
           ),
 
           Positioned(
-            bottom: 0,
+            bottom: 18,
             left: 0,
             right: 0,
             child: Row(
@@ -1126,7 +2512,7 @@ class _InlineDialInfo extends StatelessWidget {
             text: '$label ',
             style: const TextStyle(
               color: Color(0xFF8DA1B2),
-              fontSize: 7.5,
+              fontSize: 9,
               fontWeight: FontWeight.w800,
               letterSpacing: 0.3,
             ),
@@ -1135,7 +2521,7 @@ class _InlineDialInfo extends StatelessWidget {
             text: '${value.toStringAsFixed(1)}°',
             style: TextStyle(
               color: color,
-              fontSize: 10.5,
+              fontSize: 13,
               fontWeight: FontWeight.w900,
             ),
           ),
@@ -1148,34 +2534,34 @@ class _InlineDialInfo extends StatelessWidget {
 class _EmbeddedDialPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
-    final centerY = size.height * 0.55;
+    final centerY = size.height * 0.46;
 
     final glowLinePaint = Paint()
       ..color = const Color(0xFF00A8FF).withValues(alpha: 0.16)
       ..strokeWidth = 1.2;
 
     final softLinePaint = Paint()
-      ..color = Colors.white.withValues(alpha: 0.13)
+      ..color = Colors.white.withValues(alpha: 0.10)
       ..strokeWidth = 1;
 
     final shadowPaint = Paint()
-      ..color = Colors.black.withValues(alpha: 0.22)
+      ..color = Colors.black.withValues(alpha: 0.24)
       ..style = PaintingStyle.fill;
 
-    final topRect = Rect.fromLTWH(0, centerY - 30, size.width, 62);
+    final topRect = Rect.fromLTWH(0, centerY - 37, size.width, 74);
     final rrect = RRect.fromRectAndRadius(topRect, const Radius.circular(60));
     canvas.drawRRect(rrect, shadowPaint);
 
-    canvas.drawLine(
-      Offset(0, centerY),
-      Offset(size.width, centerY),
-      glowLinePaint,
-    );
+    // canvas.drawLine(
+    //   Offset(0, centerY),
+    //   Offset(size.width, centerY),
+    //   glowLinePaint,
+    // );
 
     for (int i = 0; i <= 42; i++) {
       final x = size.width * i / 42;
       final major = i % 7 == 0;
-      final h = major ? 24.0 : 10.0;
+      final h = major ? 18.0 : 7.0;
 
       canvas.drawLine(
         Offset(x, centerY - h / 2),
@@ -1794,6 +3180,820 @@ class _TinyPill extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class ClientsPage extends StatelessWidget {
+  const ClientsPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final clientsQuery = FirebaseFirestore.instance
+        .collection('clients')
+        .where('active', isEqualTo: true);
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF020B14),
+      appBar: AppBar(
+        title: const Text('Clientes'),
+        backgroundColor: const Color(0xFF061A2E),
+        actions: [
+          IconButton(
+            tooltip: 'Nuevo cliente',
+            icon: const Icon(Icons.add_business_rounded),
+            onPressed: () {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Nuevo cliente pendiente')),
+              );
+            },
+          ),
+        ],
+      ),
+      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+        stream: clientsQuery.snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return Center(
+              child: Text(
+                'Error cargando clientes:\n${snapshot.error}',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white),
+              ),
+            );
+          }
+
+          if (!snapshot.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          final clients = snapshot.data!.docs;
+
+          if (clients.isEmpty) {
+            return const Center(
+              child: Text(
+                'No hay clientes registrados',
+                style: TextStyle(color: Colors.white),
+              ),
+            );
+          }
+
+          return ListView.builder(
+            padding: const EdgeInsets.all(16),
+            itemCount: clients.length,
+            itemBuilder: (context, index) {
+              final doc = clients[index];
+              final data = doc.data();
+              return _ClientSummaryCard(clientId: doc.id, clientData: data);
+            },
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _ClientSummaryCard extends StatelessWidget {
+  const _ClientSummaryCard({required this.clientId, required this.clientData});
+
+  final String clientId;
+  final Map<String, dynamic> clientData;
+
+  @override
+  Widget build(BuildContext context) {
+    final name = clientData['name']?.toString() ?? 'Cliente sin nombre';
+
+    final devicesQuery = FirebaseFirestore.instance
+        .collection('devices')
+        .where('active', isEqualTo: true)
+        .where('current_client_id', isEqualTo: clientId);
+
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: devicesQuery.snapshots(),
+      builder: (context, snapshot) {
+        final devicesCount = snapshot.data?.docs.length ?? 0;
+
+        return Card(
+          color: const Color(0xFF061A2E),
+          margin: const EdgeInsets.only(bottom: 12),
+          child: ListTile(
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => ClientDetailPage(
+                    clientId: clientId,
+                    clientData: clientData,
+                  ),
+                ),
+              );
+            },
+            leading: const Icon(
+              Icons.business_rounded,
+              color: Color(0xFF00A8FF),
+            ),
+            title: Text(
+              name,
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            subtitle: Text(
+              '$devicesCount equipo${devicesCount == 1 ? '' : 's'} asociado${devicesCount == 1 ? '' : 's'}',
+              style: const TextStyle(color: Color(0xFF9DB0C1)),
+            ),
+            trailing: const Icon(
+              Icons.chevron_right_rounded,
+              color: Colors.white,
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class ClientDetailPage extends StatefulWidget {
+  const ClientDetailPage({
+    super.key,
+    required this.clientId,
+    required this.clientData,
+  });
+
+  final String clientId;
+  final Map<String, dynamic> clientData;
+
+  @override
+  State<ClientDetailPage> createState() => _ClientDetailPageState();
+}
+
+class _ClientDetailPageState extends State<ClientDetailPage> {
+  late String _currentClientId;
+  late Map<String, dynamic> _currentClientData;
+
+  @override
+  void initState() {
+    super.initState();
+    _currentClientId = widget.clientId;
+    _currentClientData = widget.clientData;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final name = _currentClientData['name']?.toString() ?? 'Cliente sin nombre';
+    final email = _currentClientData['email']?.toString() ?? '—';
+    final phone = _currentClientData['phone']?.toString() ?? '—';
+
+    final storesQuery = FirebaseFirestore.instance
+        .collection('stores')
+        .where('active', isEqualTo: true)
+        .where('client_id', isEqualTo: _currentClientId);
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF020B14),
+      appBar: AppBar(
+        title: Text(name),
+        backgroundColor: const Color(0xFF061A2E),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          _ClientSelectorTile(
+            selectedClientId: _currentClientId,
+            selectedClientName: name,
+            onClientSelected: (newClientId, newClientData) {
+              setState(() {
+                _currentClientId = newClientId;
+                _currentClientData = newClientData;
+              });
+            },
+          ),
+          _AccountInfoTile(
+            icon: Icons.email_rounded,
+            title: 'Correo',
+            value: email,
+          ),
+          _AccountInfoTile(
+            icon: Icons.phone_rounded,
+            title: 'Teléfono',
+            value: phone,
+          ),
+          const SizedBox(height: 18),
+          const Text(
+            'Locales asociados',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 18,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 10),
+          StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            stream: storesQuery.snapshots(),
+            builder: (context, snapshot) {
+              if (snapshot.hasError) {
+                return const Text(
+                  'Error cargando locales',
+                  style: TextStyle(color: Colors.redAccent),
+                );
+              }
+
+              if (!snapshot.hasData) {
+                return const Center(child: CircularProgressIndicator());
+              }
+
+              final stores = snapshot.data!.docs;
+
+              if (stores.isEmpty) {
+                return const Text(
+                  'Este cliente no tiene locales asociados todavía.',
+                  style: TextStyle(color: Color(0xFF9DB0C1)),
+                );
+              }
+
+              return Column(
+                children: stores.map((doc) {
+                  final data = doc.data();
+                  final storeName =
+                      data['name']?.toString() ?? 'Local sin nombre';
+                  final address = data['address']?.toString() ?? '';
+
+                  return Card(
+                    color: const Color(0xFF061A2E),
+                    margin: const EdgeInsets.only(bottom: 12),
+                    child: ListTile(
+                      onTap: () {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => StoreDetailPage(
+                              storeId: doc.id,
+                              storeData: data,
+                            ),
+                          ),
+                        );
+                      },
+                      leading: const Icon(
+                        Icons.storefront_rounded,
+                        color: Color(0xFF00A8FF),
+                      ),
+                      title: Text(
+                        storeName,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      subtitle: Text(
+                        address.isEmpty ? 'Sin dirección registrada' : address,
+                        style: const TextStyle(color: Color(0xFF9DB0C1)),
+                      ),
+                      trailing: const Icon(
+                        Icons.chevron_right_rounded,
+                        color: Colors.white,
+                      ),
+                    ),
+                  );
+                }).toList(),
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ClientSelectorTile extends StatefulWidget {
+  const _ClientSelectorTile({
+    required this.selectedClientId,
+    required this.selectedClientName,
+    required this.onClientSelected,
+  });
+
+  final String selectedClientId;
+  final String selectedClientName;
+  final void Function(String clientId, Map<String, dynamic> clientData)
+  onClientSelected;
+
+  @override
+  State<_ClientSelectorTile> createState() => _ClientSelectorTileState();
+}
+
+class _ClientSelectorTileState extends State<_ClientSelectorTile> {
+  String _searchText = '';
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      color: const Color(0xFF061A2E),
+      child: ListTile(
+        leading: const Icon(Icons.business_rounded, color: Color(0xFF00A8FF)),
+        title: const Text(
+          'Cliente',
+          style: TextStyle(color: Color(0xFF9DB0C1)),
+        ),
+        subtitle: Text(
+          widget.selectedClientName,
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        trailing: const Icon(
+          Icons.keyboard_arrow_down_rounded,
+          color: Colors.white,
+        ),
+        onTap: () async {
+          final selected =
+              await showModalBottomSheet<
+                QueryDocumentSnapshot<Map<String, dynamic>>
+              >(
+                context: context,
+                isScrollControlled: true,
+                backgroundColor: const Color(0xFF020B14),
+                builder: (context) {
+                  final clientsQuery = FirebaseFirestore.instance
+                      .collection('clients')
+                      .where('active', isEqualTo: true);
+
+                  return StatefulBuilder(
+                    builder: (context, setModalState) {
+                      return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                        stream: clientsQuery.snapshots(),
+                        builder: (context, snapshot) {
+                          if (!snapshot.hasData) {
+                            return const Center(
+                              child: CircularProgressIndicator(),
+                            );
+                          }
+
+                          final clients = snapshot.data!.docs;
+
+                          final filteredClients = clients.where((doc) {
+                            final data = doc.data();
+                            final name =
+                                data['name']?.toString().toLowerCase() ?? '';
+                            return name.contains(_searchText.toLowerCase());
+                          }).toList();
+
+                          return SafeArea(
+                            child: Padding(
+                              padding: EdgeInsets.only(
+                                left: 16,
+                                right: 16,
+                                top: 16,
+                                bottom:
+                                    MediaQuery.of(context).viewInsets.bottom +
+                                    16,
+                              ),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Text(
+                                    'Seleccionar cliente',
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 20,
+                                      fontWeight: FontWeight.w900,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 14),
+                                  TextField(
+                                    onChanged: (value) {
+                                      setModalState(() {
+                                        _searchText = value.trim();
+                                      });
+                                    },
+                                    decoration: const InputDecoration(
+                                      hintText: 'Buscar cliente...',
+                                      prefixIcon: Icon(Icons.search_rounded),
+                                      border: OutlineInputBorder(),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 12),
+                                  Flexible(
+                                    child: ListView(
+                                      shrinkWrap: true,
+                                      children: filteredClients.map((doc) {
+                                        final data = doc.data();
+                                        final name =
+                                            data['name']?.toString() ??
+                                            'Cliente sin nombre';
+
+                                        return ListTile(
+                                          leading: Icon(
+                                            doc.id == widget.selectedClientId
+                                                ? Icons.check_circle_rounded
+                                                : Icons.business_rounded,
+                                            color: const Color(0xFF00A8FF),
+                                          ),
+                                          title: Text(
+                                            name,
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                            ),
+                                          ),
+                                          onTap: () {
+                                            Navigator.pop(context, doc);
+                                          },
+                                        );
+                                      }).toList(),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      );
+                    },
+                  );
+                },
+              );
+
+          if (selected == null) return;
+
+          setState(() {
+            _searchText = '';
+          });
+
+          widget.onClientSelected(selected.id, selected.data());
+        },
+      ),
+    );
+  }
+}
+
+class _ClientDocumentSearchSheet extends StatefulWidget {
+  const _ClientDocumentSearchSheet({required this.selectedClientId});
+
+  final String selectedClientId;
+
+  @override
+  State<_ClientDocumentSearchSheet> createState() =>
+      _ClientDocumentSearchSheetState();
+}
+
+class _ClientDocumentSearchSheetState
+    extends State<_ClientDocumentSearchSheet> {
+  String _searchText = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final clientsQuery = FirebaseFirestore.instance
+        .collection('clients')
+        .where('active', isEqualTo: true);
+
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: 16,
+          right: 16,
+          top: 16,
+          bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+        ),
+        child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+          stream: clientsQuery.snapshots(),
+          builder: (context, snapshot) {
+            final clients = snapshot.data?.docs ?? [];
+
+            final filteredClients = clients.where((doc) {
+              final data = doc.data();
+              final name = data['name']?.toString().toLowerCase() ?? '';
+              return name.contains(_searchText.toLowerCase());
+            }).toList();
+
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Seleccionar cliente',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                TextField(
+                  onChanged: (value) {
+                    setState(() {
+                      _searchText = value.trim();
+                    });
+                  },
+                  decoration: const InputDecoration(
+                    hintText: 'Buscar cliente...',
+                    prefixIcon: Icon(Icons.search_rounded),
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Flexible(
+                  child: ListView(
+                    shrinkWrap: true,
+                    children: filteredClients.map((doc) {
+                      final data = doc.data();
+                      final name =
+                          data['name']?.toString() ?? 'Cliente sin nombre';
+
+                      return ListTile(
+                        leading: Icon(
+                          doc.id == widget.selectedClientId
+                              ? Icons.check_circle_rounded
+                              : Icons.business_rounded,
+                          color: const Color(0xFF00A8FF),
+                        ),
+                        title: Text(
+                          name,
+                          style: const TextStyle(color: Colors.white),
+                        ),
+                        onTap: () {
+                          Navigator.pop(context, doc);
+                        },
+                      );
+                    }).toList(),
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class StoreDetailPage extends StatefulWidget {
+  const StoreDetailPage({
+    super.key,
+    required this.storeId,
+    required this.storeData,
+  });
+
+  final String storeId;
+  final Map<String, dynamic> storeData;
+
+  @override
+  State<StoreDetailPage> createState() => _StoreDetailPageState();
+}
+
+class _StoreDetailPageState extends State<StoreDetailPage> {
+  late String _currentStoreId;
+  late Map<String, dynamic> _currentStoreData;
+
+  @override
+  void initState() {
+    super.initState();
+    _currentStoreId = widget.storeId;
+    _currentStoreData = widget.storeData;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final storeName =
+        _currentStoreData['name']?.toString() ?? 'Local sin nombre';
+
+    final address = _currentStoreData['address']?.toString() ?? '—';
+
+    final devicesQuery = FirebaseFirestore.instance
+        .collection('devices')
+        .where('active', isEqualTo: true)
+        .where('current_store_id', isEqualTo: _currentStoreId);
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF020B14),
+      appBar: AppBar(
+        title: Text(storeName),
+        backgroundColor: const Color(0xFF061A2E),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          _StoreSelectorTile(
+            selectedStoreId: _currentStoreId,
+            selectedStoreName: storeName,
+            clientId: _currentStoreData['client_id']?.toString() ?? '',
+            onStoreSelected: (newStoreId, newStoreData) {
+              setState(() {
+                _currentStoreId = newStoreId;
+                _currentStoreData = newStoreData;
+              });
+            },
+          ),
+          _AccountInfoTile(
+            icon: Icons.location_on_rounded,
+            title: 'Dirección',
+            value: address,
+          ),
+          const SizedBox(height: 18),
+          const Text(
+            'Equipos del local',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 18,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 10),
+          StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            stream: devicesQuery.snapshots(),
+            builder: (context, snapshot) {
+              if (!snapshot.hasData) {
+                return const Center(child: CircularProgressIndicator());
+              }
+
+              final devices = snapshot.data!.docs;
+
+              if (devices.isEmpty) {
+                return const Text(
+                  'Este local no tiene equipos asociados todavía.',
+                  style: TextStyle(color: Color(0xFF9DB0C1)),
+                );
+              }
+
+              return Column(
+                children: devices.map((doc) {
+                  return _DeviceSummaryCard(
+                    deviceId: doc.id,
+                    deviceData: doc.data(),
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => DeviceStatusPage(deviceId: doc.id),
+                        ),
+                      );
+                    },
+                  );
+                }).toList(),
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StoreSelectorTile extends StatefulWidget {
+  const _StoreSelectorTile({
+    required this.selectedStoreId,
+    required this.selectedStoreName,
+    required this.clientId,
+    required this.onStoreSelected,
+  });
+
+  final String selectedStoreId;
+  final String selectedStoreName;
+  final String clientId;
+  final void Function(String storeId, Map<String, dynamic> storeData)
+  onStoreSelected;
+
+  @override
+  State<_StoreSelectorTile> createState() => _StoreSelectorTileState();
+}
+
+class _StoreSelectorTileState extends State<_StoreSelectorTile> {
+  String _searchText = '';
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      color: const Color(0xFF061A2E),
+      child: ListTile(
+        leading: const Icon(Icons.storefront_rounded, color: Color(0xFF00A8FF)),
+        title: const Text('Local', style: TextStyle(color: Color(0xFF9DB0C1))),
+        subtitle: Text(
+          widget.selectedStoreName,
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        trailing: const Icon(
+          Icons.keyboard_arrow_down_rounded,
+          color: Colors.white,
+        ),
+        onTap: () async {
+          final selected =
+              await showModalBottomSheet<
+                QueryDocumentSnapshot<Map<String, dynamic>>
+              >(
+                context: context,
+                isScrollControlled: true,
+                backgroundColor: const Color(0xFF020B14),
+                builder: (context) {
+                  final storesQuery = FirebaseFirestore.instance
+                      .collection('stores')
+                      .where('active', isEqualTo: true)
+                      .where('client_id', isEqualTo: widget.clientId);
+
+                  return StatefulBuilder(
+                    builder: (context, setModalState) {
+                      return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                        stream: storesQuery.snapshots(),
+                        builder: (context, snapshot) {
+                          if (!snapshot.hasData) {
+                            return const Center(
+                              child: CircularProgressIndicator(),
+                            );
+                          }
+
+                          final stores = snapshot.data!.docs;
+
+                          final filteredStores = stores.where((doc) {
+                            final data = doc.data();
+                            final name =
+                                data['name']?.toString().toLowerCase() ?? '';
+                            return name.contains(_searchText.toLowerCase());
+                          }).toList();
+
+                          return SafeArea(
+                            child: Padding(
+                              padding: EdgeInsets.only(
+                                left: 16,
+                                right: 16,
+                                top: 16,
+                                bottom:
+                                    MediaQuery.of(context).viewInsets.bottom +
+                                    16,
+                              ),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Text(
+                                    'Seleccionar local',
+                                    style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 20,
+                                      fontWeight: FontWeight.w900,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 14),
+                                  TextField(
+                                    onChanged: (value) {
+                                      setModalState(() {
+                                        _searchText = value.trim();
+                                      });
+                                    },
+                                    decoration: const InputDecoration(
+                                      hintText: 'Buscar local...',
+                                      prefixIcon: Icon(Icons.search_rounded),
+                                      border: OutlineInputBorder(),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 12),
+                                  Flexible(
+                                    child: ListView(
+                                      shrinkWrap: true,
+                                      children: filteredStores.map((doc) {
+                                        final data = doc.data();
+                                        final name =
+                                            data['name']?.toString() ??
+                                            'Local sin nombre';
+
+                                        return ListTile(
+                                          leading: Icon(
+                                            doc.id == widget.selectedStoreId
+                                                ? Icons.check_circle_rounded
+                                                : Icons.storefront_rounded,
+                                            color: const Color(0xFF00A8FF),
+                                          ),
+                                          title: Text(
+                                            name,
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                            ),
+                                          ),
+                                          onTap: () {
+                                            Navigator.pop(context, doc);
+                                          },
+                                        );
+                                      }).toList(),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      );
+                    },
+                  );
+                },
+              );
+
+          if (selected == null) return;
+
+          setState(() {
+            _searchText = '';
+          });
+
+          widget.onStoreSelected(selected.id, selected.data());
+        },
       ),
     );
   }
