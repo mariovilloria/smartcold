@@ -82,6 +82,12 @@ class TelemetryData(BaseModel):
     detected_sensors: list[str] = []
     sensor_readings: Dict[str, float] = {}
     sensor_alarms: Dict[str, dict] = {}
+    
+    hardware_uid: str | None = None
+    firmware_version: str | None = None
+
+    configured: bool | None = None
+    provisioning_status: str | None = None
 
 
 # =====================================
@@ -250,6 +256,67 @@ def receive_telemetry(data: TelemetryData):
 
     status_doc = db.collection("device_status").document(data.device_id).get()
     current_status = status_doc.to_dict() if status_doc.exists else {}
+    device_ref = db.collection("devices").document(data.device_id)
+    device_doc = device_ref.get()
+
+    if not device_doc.exists:
+        unregistered_status = {
+            "device_id": data.device_id,
+            "hardware_uid": data.hardware_uid,
+            "firmware_version": data.firmware_version,
+            "online": True,
+            "configured": False,
+            "provisioning_status": "device_not_registered",
+            "device_state": "SETUP",
+            "device_health": "SETUP",
+            "device_health_reason": "DEVICE_NOT_REGISTERED",
+            "compressor_block_reason": "DEVICE_NOT_REGISTERED",
+            "detected_sensors": data.detected_sensors,
+            "sensor_readings": data.sensor_readings,
+            "rssi": data.rssi,
+            "last_seen_at": now_iso,
+            "updated_at": now_iso,
+        }
+
+        db.collection("device_status").document(data.device_id).set(
+            unregistered_status,
+            merge=True,
+        )
+
+        return {
+            "success": False,
+            "message": "DEVICE_NOT_REGISTERED",
+            "config_pending": False,
+        }
+
+    device_data = device_doc.to_dict() or {}
+    saved_hardware_uid = device_data.get("hardware_uid")
+
+    if (
+        saved_hardware_uid
+        and data.hardware_uid
+        and saved_hardware_uid != data.hardware_uid
+    ):
+        print("🚨 CONFLICTO CRITICO DE HARDWARE UID")
+        print("Device ID:", data.device_id)
+        print("Firestore hardware_uid:", saved_hardware_uid)
+        print("Incoming hardware_uid:", data.hardware_uid)
+
+        return {
+            "success": False,
+            "message": "HARDWARE_UID_CONFLICT",
+            "config_pending": False,
+        }
+
+    device_ref.set(
+        {
+            "hardware_uid": data.hardware_uid or saved_hardware_uid,
+            "firmware_version": data.firmware_version,
+            "updated_at": now_iso,
+            "last_seen_at": now_iso,
+        },
+        merge=True,
+    )
 
     alarm = False
     alarm_reason = None
@@ -272,6 +339,11 @@ def receive_telemetry(data: TelemetryData):
         "humidity": data.humidity,
         "rssi": data.rssi,
         "online": True,
+        "hardware_uid": data.hardware_uid,
+        "firmware_version": data.firmware_version,
+
+        "configured": data.configured,
+        "provisioning_status": data.provisioning_status,
         "connection_status": connection_status,
         "seconds_since_last_seen": seconds_since_last_seen,
         "last_seen_at": now_iso,
@@ -550,83 +622,57 @@ def update_device_config(device_id: str, config: DeviceConfigUpdate):
 @app.get("/api/devices/{device_id}/config")
 def get_device_config(device_id: str):
 
-    doc = db.collection("device_config").document(device_id).get()
+    device_doc = db.collection("devices").document(device_id).get()
 
-    if not doc.exists:
-        default_config = {
-            "device_id": device_id,
-            "config_version": 1,
-            "compressor": {
-                "enabled": True,
-                "control_sensor_role": "chamber",
-                "setpoint": 4,
-                "differential": 2,
-                "min_off_seconds": 180,
-                "force_off_on_sensor_error": True,
+    if not device_doc.exists:
+        return {
+            "success": False,
+            "error": "DEVICE_NOT_REGISTERED",
+            "config": {
+                "configured": False,
+                "provisioning_status": "device_not_registered",
+                "config_pending": False,
             },
-            "sensors": [
-                {
-                    "id": "chamber_1",
-                    "role": "chamber",
-                    "name": "Sonda cámara",
-                    "type": "ds18b20",
-                    "bus": "onewire",
-                    "pin": 4,
-                    "address": "",
-                    "enabled": True,
-                    "offset": 0,
-                    "alarm_enabled": True,
-                    "temp_min_alarm": 0,
-                    "temp_max_alarm": 8,
-                    "can_stop_compressor": True,
-                }
-            ],
-            "outputs": {
-                "compressor": {
-                    "enabled": True,
-                    "pin": 26,
-                    "active_level": "HIGH",
-                    "name": "Salida compresor",
-                },
-                "defrost": {
-                    "enabled": False,
-                    "pin": 27,
-                    "active_level": "HIGH",
-                    "name": "Salida defrost",
-                },
-                "fan": {
-                    "enabled": False,
-                    "pin": 25,
-                    "active_level": "HIGH",
-                    "name": "Salida ventilador",
-                },
-                "alarm": {
-                    "enabled": False,
-                    "pin": 14,
-                    "active_level": "HIGH",
-                    "name": "Salida alarma",
-                },
-            },
-            "defrost": {
-                "enabled": False,
-                "mode": "time",
-                "interval_minutes": 360,
-                "duration_minutes": 20,
-                "end_sensor_role": "evaporator",
-                "end_temperature": 8,
-                "drip_time_seconds": 120,
-            },
-            "safety": {
-                "offline_mode": "local_control",
-                "sensor_error_action": "compressor_off",
-                "max_compressor_runtime_minutes": 0,
-            },
-            "updated_at": datetime.now().isoformat(),
         }
 
-        return {"success": True, "config": default_config}
+    device_data = device_doc.to_dict() or {}
+    device_status = device_data.get("status")
 
-    return {"success": True, "config": doc.to_dict()}
+    if device_status != "installed":
+        return {
+            "success": True,
+            "config": {
+                "device_id": device_id,
+                "configured": False,
+                "provisioning_status": "pending_installation",
+                "device_status": device_status,
+                "config_pending": False,
+                "last_config_ack_at": device_data.get("last_config_ack_at"),
+            },
+        }
+
+    config_doc = db.collection("device_config").document(device_id).get()
+
+    if not config_doc.exists:
+        return {
+            "success": False,
+            "error": "CONFIG_NOT_FOUND",
+            "config": {
+                "device_id": device_id,
+                "configured": False,
+                "provisioning_status": "config_missing",
+                "config_pending": False,
+            },
+        }
+
+    config_data = config_doc.to_dict() or {}
+    config_data["configured"] = True
+    config_data["provisioning_status"] = "configured"
+
+    return {
+        "success": True,
+        "config": config_data,
+    }
 
 
 @app.get("/api/devices/{device_id}/config-summary")
@@ -649,14 +695,19 @@ def get_device_config_summary(device_id: str):
         (s for s in sensors if s.get("role") == "chamber"),
         {},
     )
-
+    setpoint = compressor.get("setpoint", 4)
+    differential = compressor.get("differential", 2)
+    turn_on_temperature = setpoint + differential
+    turn_off_temperature = setpoint
     return {
         "success": True,
         "device_id": device_id,
         "operation_mode": config.get("operation_mode", "refrigerate"),
         "cooling_level": config.get("cooling_level", 4),
-        "setpoint": compressor.get("setpoint", 4),
-        "differential": compressor.get("differential", 2),
+        "setpoint": setpoint,
+        "differential": differential,
+        "turn_on_temperature": turn_on_temperature,
+        "turn_off_temperature": turn_off_temperature,
         "temp_max_alarm": chamber_sensor.get("temp_max_alarm"),
         "temp_min_alarm": chamber_sensor.get("temp_min_alarm"),
         "config_pending": config.get("config_pending", False),

@@ -6,22 +6,39 @@
 #include <Preferences.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
-
+bool tieneConfiguracionOperativa();
 const bool BORRAR_WIFI_AL_INICIAR = false;
+const bool BORRAR_CONFIG_SMARTCOLD_AL_INICIAR = false;
+const String FIRMWARE_VERSION = "0.2.0-provisioning";
 unsigned long ultimoIntentoConfig = 0;
 const unsigned long INTERVALO_CONFIG_MS = 60000;
 // const unsigned long INTERVALO_CONFIG_MS = 15UL * 60UL * 1000UL;
 
 unsigned long ultimoIntentoWifi = 0;
 const unsigned long INTERVALO_REINTENTO_WIFI_MS = 30000;
-int cloudFailCount = 0;
-unsigned long lastCloudOkMillis = 0;
-bool cloudConnected = false;
 
-const int CLOUD_FAIL_WARNING_COUNT = 3;
-const int CLOUD_FAIL_OFFLINE_COUNT = 6;
+String DEVICE_ID = "";
+String obtenerHardwareUid()
+{
+  uint64_t chipid = ESP.getEfuseMac();
+  char uid[13];
+  snprintf(uid, sizeof(uid), "%04X%08X", (uint16_t)(chipid >> 32), (uint32_t)chipid);
+  return String(uid);
+}
 
-const String DEVICE_ID = "SmartCold-5494";
+String obtenerDeviceIdUnico()
+{
+  String uid = obtenerHardwareUid();
+
+  if (uid.length() == 0)
+  {
+    return "SmartCold-SINUID";
+  }
+
+  return "SmartCold-" + uid;
+}
+
+String HARDWARE_UID = "";
 const String API_BASE_URL = "https://smartcold-api-649501100610.us-central1.run.app";
 
 const int PIN_ONEWIRE = 4;
@@ -188,16 +205,7 @@ void enviarTelemetria()
 {
   if (WiFi.status() != WL_CONNECTED)
   {
-    cloudFailCount++;
-
-    if (cloudFailCount >= CLOUD_FAIL_OFFLINE_COUNT)
-    {
-      cloudConnected = false;
-    }
-
     Serial.println("❌ WIFI NO CONECTADO");
-    Serial.print("Fallos consecutivos nube: ");
-    Serial.println(cloudFailCount);
     return;
   }
 
@@ -210,31 +218,40 @@ void enviarTelemetria()
   JsonDocument doc;
 
   doc["device_id"] = DEVICE_ID;
+  doc["hardware_uid"] = HARDWARE_UID;
+  doc["firmware_version"] = FIRMWARE_VERSION;
   doc["temperature"] = temperaturaActual;
   doc["humidity"] = 65;
   doc["rssi"] = WiFi.RSSI();
   doc["online"] = true;
-  doc["cloud_connected"] = cloudConnected;
-  doc["cloud_fail_count"] = cloudFailCount;
-  doc["last_cloud_ok_ms"] = lastCloudOkMillis;
 
-  if (cloudFailCount >= CLOUD_FAIL_OFFLINE_COUNT)
+  bool configurado = tieneConfiguracionOperativa();
+
+  doc["configured"] = configurado;
+  doc["provisioning_status"] = configurado ? "configured" : "pending_installation";
+
+  if (!configurado)
   {
-    doc["cloud_status"] = "offline";
-  }
-  else if (cloudFailCount >= CLOUD_FAIL_WARNING_COUNT)
-  {
-    doc["cloud_status"] = "warning";
+    compressorRelayOn = false;
+    compressorShouldBeOn = false;
+    compressorCanTurnOn = false;
+    defrostActive = false;
+    dripActive = false;
+    localProtectionActive = false;
+    localProtectionWaitSecondsRemaining = 0;
+
+    doc["device_state"] = "SETUP";
+    doc["device_health"] = "SETUP";
+    doc["device_health_reason"] = "PENDING_INSTALLATION";
+    doc["compressor_block_reason"] = "PENDING_INSTALLATION";
   }
   else
   {
-    doc["cloud_status"] = "online";
+    doc["device_state"] = obtenerEstadoOperativo();
+    doc["device_health"] = obtenerSaludDispositivo();
+    doc["device_health_reason"] = obtenerMotivoSaludDispositivo();
+    doc["compressor_block_reason"] = obtenerMotivoBloqueoCompresor();
   }
-
-  doc["device_state"] = obtenerEstadoOperativo();
-  doc["device_health"] = obtenerSaludDispositivo();
-  doc["device_health_reason"] = obtenerMotivoSaludDispositivo();
-  doc["compressor_block_reason"] = obtenerMotivoBloqueoCompresor();
   doc["compressor_relay_on"] = compressorRelayOn;
   doc["compressor_should_be_on"] = compressorShouldBeOn;
   doc["compressor_can_turn_on"] = compressorCanTurnOn;
@@ -351,28 +368,14 @@ void enviarTelemetria()
 
   if (httpCode <= 0)
   {
-    cloudFailCount++;
-
-    if (cloudFailCount >= CLOUD_FAIL_OFFLINE_COUNT)
-    {
-      cloudConnected = false;
-    }
-
     Serial.print("ERROR HTTP: ");
     Serial.println(http.errorToString(httpCode));
-    Serial.print("Fallos consecutivos nube: ");
-    Serial.println(cloudFailCount);
-
     http.end();
     return;
   }
 
   Serial.print("HTTP CODE: ");
   Serial.println(httpCode);
-
-  cloudFailCount = 0;
-  cloudConnected = true;
-  lastCloudOkMillis = millis();
 
   String response = http.getString();
 
@@ -400,7 +403,63 @@ void enviarTelemetria()
 
   http.end();
 }
+bool tieneConfiguracionOperativa()
+{
+  return configUpdatedAt.length() > 0 &&
+         cantidadSensoresConfigurados > 0 &&
+         sensorCamaraAddress.length() > 0;
+}
 
+bool respuestaTieneConfiguracionOperativa(JsonObject config)
+{
+  if (config.isNull())
+  {
+    return false;
+  }
+
+  if (!config.containsKey("compressor"))
+  {
+    return false;
+  }
+
+  if (!config.containsKey("sensors"))
+  {
+    return false;
+  }
+
+  JsonArray sensors = config["sensors"].as<JsonArray>();
+
+  if (sensors.isNull() || sensors.size() == 0)
+  {
+    return false;
+  }
+
+  return true;
+}
+
+void borrarConfiguracionOperativaGuardada()
+{
+  preferences.remove("setpoint");
+  preferences.remove("diff");
+  preferences.remove("min_off");
+  preferences.remove("cfg_time");
+  preferences.remove("ctrl_role");
+  preferences.remove("cam_addr");
+  preferences.remove("evap_addr");
+  preferences.remove("def_en");
+  preferences.remove("def_int");
+  preferences.remove("def_dur");
+  preferences.remove("def_role");
+  preferences.remove("def_temp");
+  preferences.remove("drip_sec");
+
+  configUpdatedAt = "";
+  cantidadSensoresConfigurados = 0;
+  sensorCamaraAddress = "";
+  sensorEvaporadorAddress = "";
+
+  Serial.println("🧹 Configuracion operativa local eliminada.");
+}
 void confirmarConfiguracionDescargada()
 {
   if (WiFi.status() != WL_CONNECTED)
@@ -487,6 +546,24 @@ void descargarConfiguracion()
   }
 
   JsonObject config = doc["config"];
+  bool configPending = config["config_pending"] | false;
+
+  if (!respuestaTieneConfiguracionOperativa(config))
+  {
+    Serial.println("⚙️ Backend no entrego configuracion operativa completa.");
+    Serial.println("Equipo permanece en modo instalacion. No se guardan parametros locales.");
+
+    borrarConfiguracionOperativaGuardada();
+
+    http.end();
+
+    if (configPending)
+    {
+      Serial.println("⚠️ Config pendiente invalida. No se confirma ACK.");
+    }
+
+    return;
+  }
 
   String remoteUpdatedAt = config["updated_at"] | "";
 
@@ -1361,6 +1438,14 @@ void setup()
   Serial.println("==========================");
   Serial.println("SMARTCOLD INICIANDO");
   Serial.println("==========================");
+  HARDWARE_UID = obtenerHardwareUid();
+  DEVICE_ID = obtenerDeviceIdUnico();
+
+  Serial.print("Hardware UID: ");
+  Serial.println(HARDWARE_UID);
+
+  Serial.print("Device ID unico: ");
+  Serial.println(DEVICE_ID);
   detectarSensoresDS18B20();
 
   preferences.begin("smartcold", false);
@@ -1397,11 +1482,20 @@ void setup()
   configDefrostEndTemperature = preferences.getFloat("def_temp", configDefrostEndTemperature);
   configDripTimeSeconds = preferences.getInt("drip_sec", configDripTimeSeconds);
 
+  cargarSensoresConfiguradosDesdeMemoria();
+
+  if (!tieneConfiguracionOperativa())
+  {
+    Serial.println("⚙️ No hay configuracion operativa local valida.");
+    Serial.println("Se ignoran sensores/parametros viejos y el equipo queda en modo instalacion.");
+    borrarConfiguracionOperativaGuardada();
+  }
+
   Serial.print("Sensor camara configurado: ");
   Serial.println(sensorCamaraAddress);
   Serial.print("Sensor evaporador configurado: ");
   Serial.println(sensorEvaporadorAddress);
-  cargarSensoresConfiguradosDesdeMemoria();
+
   Serial.println("Configuracion local cargada:");
   Serial.print("Setpoint: ");
   Serial.println(configSetpoint);
@@ -1440,9 +1534,7 @@ void setup()
     wifiManager.resetSettings();
   }
 
-  String nombreAP = "SmartCold-" + String((uint32_t)ESP.getEfuseMac(), HEX);
-  nombreAP = nombreAP.substring(nombreAP.length() - 4);
-  nombreAP = "SmartCold-" + nombreAP;
+  String nombreAP = DEVICE_ID;
 
   Serial.println("Iniciando portal WiFiManager...");
   Serial.print("Red configuracion: ");
@@ -1495,15 +1587,35 @@ void verificarConexionWifi()
 void loop()
 {
   leerTemperaturasDS18B20();
-  evaluarAlarmasSensores();
 
-  verificarInicioDefrost();
-  verificarFinDefrost();
-  verificarFinGoteo();
+  bool configurado = tieneConfiguracionOperativa();
 
-  actualizarTemperaturaPrueba();
-  calcularControlCompresorLocal();
-  actualizarTiempoCompresorParaDefrost();
+  if (!configurado)
+  {
+    compressorRelayOn = false;
+    compressorShouldBeOn = false;
+    compressorCanTurnOn = false;
+    defrostActive = false;
+    dripActive = false;
+    localProtectionActive = false;
+    localProtectionWaitSecondsRemaining = 0;
+
+    aplicarSalidaCompresor();
+
+    Serial.println("⚙️ Instalacion pendiente. Control de refrigeracion deshabilitado.");
+  }
+  else
+  {
+    evaluarAlarmasSensores();
+
+    verificarInicioDefrost();
+    verificarFinDefrost();
+    verificarFinGoteo();
+
+    actualizarTemperaturaPrueba();
+    calcularControlCompresorLocal();
+    actualizarTiempoCompresorParaDefrost();
+  }
 
   verificarConexionWifi();
 

@@ -166,16 +166,34 @@ class _DevicesPageState extends State<DevicesPage> {
         .collection('devices')
         .where('active', isEqualTo: true);
 
-    if (role == 'client') {
+    final isAdmin = role == 'admin';
+    final isClient = role == 'client';
+    final isTechnician = role == 'technician';
+
+    if (isClient || isTechnician) {
       if (clientId == null || clientId.isEmpty) {
         return const AccessDeniedPage(
-          message: 'Este usuario no tiene cliente asociado.',
+          message: 'Este usuario no tiene cliente personal asociado.',
         );
       }
 
       devicesQuery = devicesQuery.where(
         'current_client_id',
         isEqualTo: clientId,
+      );
+    }
+
+    if (isAdmin && _selectedClientId != null) {
+      devicesQuery = devicesQuery.where(
+        'current_client_id',
+        isEqualTo: _selectedClientId,
+      );
+    }
+
+    if (isAdmin && _selectedStoreId != null) {
+      devicesQuery = devicesQuery.where(
+        'current_store_id',
+        isEqualTo: _selectedStoreId,
       );
     }
 
@@ -771,6 +789,15 @@ class _DevicesHeader extends StatelessWidget {
                 icon: const Icon(Icons.menu_rounded, color: Color(0xFF9DB0C1)),
                 color: const Color(0xFF061A2E),
                 onSelected: (value) async {
+                  if (value == 'new_installation') {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const NewInstallationPage(),
+                      ),
+                    );
+                    return;
+                  }
                   if (value == 'clients') {
                     Navigator.push(
                       context,
@@ -815,6 +842,11 @@ class _DevicesHeader extends StatelessWidget {
                   }
                 },
                 itemBuilder: (context) => [
+                  if (role == 'admin' || role == 'technician')
+                    const PopupMenuItem(
+                      value: 'new_installation',
+                      child: Text('Nueva instalación'),
+                    ),
                   if (role == 'admin')
                     const PopupMenuItem(
                       value: 'clients',
@@ -3350,7 +3382,10 @@ class _ClientDetailPageState extends State<ClientDetailPage> {
         .collection('stores')
         .where('active', isEqualTo: true)
         .where('client_id', isEqualTo: _currentClientId);
-
+    final usersQuery = FirebaseFirestore.instance
+        .collection('users')
+        .where('active', isEqualTo: true)
+        .where('client_id', isEqualTo: _currentClientId);
     return Scaffold(
       backgroundColor: const Color(0xFF020B14),
       appBar: AppBar(
@@ -3453,6 +3488,86 @@ class _ClientDetailPageState extends State<ClientDetailPage> {
                       trailing: const Icon(
                         Icons.chevron_right_rounded,
                         color: Colors.white,
+                      ),
+                    ),
+                  );
+                }).toList(),
+              );
+            },
+          ),
+          const SizedBox(height: 18),
+          const Text(
+            'Usuarios asociados',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 18,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: () {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Agregar usuario pendiente')),
+                );
+              },
+              icon: const Icon(Icons.person_add_rounded),
+              label: const Text('Agregar usuario'),
+            ),
+          ),
+          const SizedBox(height: 10),
+          const SizedBox(height: 10),
+          StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            stream: usersQuery.snapshots(),
+            builder: (context, snapshot) {
+              if (snapshot.hasError) {
+                return const Text(
+                  'Error cargando usuarios',
+                  style: TextStyle(color: Colors.redAccent),
+                );
+              }
+
+              if (!snapshot.hasData) {
+                return const Center(child: CircularProgressIndicator());
+              }
+
+              final users = snapshot.data!.docs;
+
+              if (users.isEmpty) {
+                return const Text(
+                  'Este cliente no tiene usuarios asociados todavía.',
+                  style: TextStyle(color: Color(0xFF9DB0C1)),
+                );
+              }
+
+              return Column(
+                children: users.map((doc) {
+                  final data = doc.data();
+                  final email =
+                      data['email']?.toString() ?? 'Usuario sin correo';
+                  final role = data['role']?.toString() ?? 'sin rol';
+                  final active = data['active'] == true;
+
+                  return Card(
+                    color: const Color(0xFF061A2E),
+                    margin: const EdgeInsets.only(bottom: 12),
+                    child: ListTile(
+                      leading: const Icon(
+                        Icons.person_rounded,
+                        color: Color(0xFF00A8FF),
+                      ),
+                      title: Text(
+                        email,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      subtitle: Text(
+                        'Rol: $role · ${active ? 'Activo' : 'Inactivo'}',
+                        style: const TextStyle(color: Color(0xFF9DB0C1)),
                       ),
                     ),
                   );
@@ -3994,6 +4109,988 @@ class _StoreSelectorTileState extends State<_StoreSelectorTile> {
 
           widget.onStoreSelected(selected.id, selected.data());
         },
+      ),
+    );
+  }
+}
+
+class NewInstallationPage extends StatefulWidget {
+  const NewInstallationPage({super.key});
+
+  @override
+  State<NewInstallationPage> createState() => _NewInstallationPageState();
+}
+
+class _NewInstallationPageState extends State<NewInstallationPage> {
+  bool _wifiConfigured = false;
+  String? _configuredWifiName;
+  bool _connectionVerified = false;
+  bool _sensorsDetected = false;
+  bool _sensorRolesAssigned = false;
+
+  final List<String> _mockDetectedSensors = [
+    '28FF641D8A01AB12',
+    '28FF641D8A01CD34',
+  ];
+
+  Map<String, String> _assignedSensorRoles = {};
+
+  Map<String, String>? _selectedDevice;
+
+  final List<Map<String, String>> _mockDetectedDevices = [
+    {
+      'device_id': 'SmartCold-2CBB74C55494',
+      'hardware_uid': '2CBB74C55494',
+      'firmware_version': '1.0.0',
+    },
+    {
+      'device_id': 'SmartCold-A1B2C3D4E5F6',
+      'hardware_uid': 'A1B2C3D4E5F6',
+      'firmware_version': '1.0.0',
+    },
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF020B14),
+      appBar: AppBar(
+        title: const Text('Nueva instalación'),
+        backgroundColor: const Color(0xFF061A2E),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          const Text(
+            'Asistente de instalación',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 24,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Sigue los pasos para dejar un dispositivo SmartCold funcionando y visible para el cliente.',
+            style: TextStyle(
+              color: Color(0xFF9DB0C1),
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 18),
+          const SizedBox(height: 18),
+          const Text(
+            'Instalaciones en progreso',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 18,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 10),
+          const _ActiveInstallationsList(),
+          const SizedBox(height: 18),
+          Card(
+            color: const Color(0xFF061A2E),
+            child: ListTile(
+              leading: const Icon(
+                Icons.memory_rounded,
+                color: Color(0xFF00A8FF),
+              ),
+              title: const Text(
+                '1. Conectar con dispositivo',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              subtitle: Text(
+                _selectedDevice == null
+                    ? 'Detectar el ESP32 SmartCold que será instalado.'
+                    : 'Dispositivo seleccionado: ${_selectedDevice!['device_id']} · Firmware ${_selectedDevice!['firmware_version']}',
+                style: const TextStyle(color: Color(0xFF9DB0C1)),
+              ),
+              trailing: Icon(
+                _selectedDevice == null
+                    ? Icons.chevron_right_rounded
+                    : Icons.check_circle_rounded,
+                color: _selectedDevice == null
+                    ? Colors.white
+                    : const Color(0xFF20D76D),
+              ),
+              onTap: () async {
+                final selected =
+                    await showModalBottomSheet<Map<String, String>>(
+                      context: context,
+                      backgroundColor: const Color(0xFF020B14),
+                      builder: (context) {
+                        return SafeArea(
+                          child: ListView(
+                            padding: const EdgeInsets.all(16),
+                            children: [
+                              const Text(
+                                'Dispositivos SmartCold detectados',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 20,
+                                  fontWeight: FontWeight.w900,
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              ..._mockDetectedDevices.map((device) {
+                                return Card(
+                                  color: const Color(0xFF061A2E),
+                                  child: ListTile(
+                                    leading: const Icon(
+                                      Icons.memory_rounded,
+                                      color: Color(0xFF00A8FF),
+                                    ),
+                                    title: Text(
+                                      device['device_id'] ??
+                                          'SmartCold desconocido',
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.w900,
+                                      ),
+                                    ),
+                                    subtitle: Text(
+                                      'Firmware ${device['firmware_version']}',
+                                      style: const TextStyle(
+                                        color: Color(0xFF9DB0C1),
+                                      ),
+                                    ),
+                                    onTap: () {
+                                      Navigator.pop(context, device);
+                                    },
+                                  ),
+                                );
+                              }),
+                            ],
+                          ),
+                        );
+                      },
+                    );
+
+                if (selected == null) return;
+
+                setState(() {
+                  _selectedDevice = selected;
+                  _wifiConfigured = false;
+                  _connectionVerified = false;
+                  _sensorsDetected = false;
+                  _sensorRolesAssigned = false;
+                  _assignedSensorRoles = {};
+                  _configuredWifiName = null;
+                });
+              },
+            ),
+          ),
+
+          if (_selectedDevice != null) ...[
+            const SizedBox(height: 14),
+            Card(
+              color: const Color(0xFF061A2E),
+              child: ListTile(
+                leading: const Icon(
+                  Icons.wifi_rounded,
+                  color: Color(0xFF00A8FF),
+                ),
+                title: const Text(
+                  '2. Configurar WiFi',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                subtitle: Text(
+                  _wifiConfigured
+                      ? 'WiFi configurado: ${_configuredWifiName ?? 'red guardada'}'
+                      : 'Enviar red WiFi del cliente al dispositivo.',
+                  style: const TextStyle(color: Color(0xFF9DB0C1)),
+                ),
+                trailing: Icon(
+                  _wifiConfigured
+                      ? Icons.check_circle_rounded
+                      : Icons.chevron_right_rounded,
+                  color: _wifiConfigured ? Color(0xFF20D76D) : Colors.white,
+                ),
+                onTap: () async {
+                  final wifiName = await showModalBottomSheet<String>(
+                    context: context,
+                    isScrollControlled: true,
+                    backgroundColor: const Color(0xFF020B14),
+                    builder: (context) {
+                      return const _WifiConfigSheet();
+                    },
+                  );
+
+                  if (wifiName == null || wifiName.isEmpty) return;
+
+                  setState(() {
+                    _configuredWifiName = wifiName;
+                    _wifiConfigured = true;
+                  });
+                },
+              ),
+            ),
+            if (_wifiConfigured) ...[
+              const SizedBox(height: 14),
+              Card(
+                color: const Color(0xFF061A2E),
+                child: ListTile(
+                  leading: const Icon(
+                    Icons.cloud_done_rounded,
+                    color: Color(0xFF00A8FF),
+                  ),
+                  title: const Text(
+                    '3. Verificar conexión',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  subtitle: Text(
+                    _connectionVerified
+                        ? 'ESP conectado correctamente al backend.'
+                        : 'Esperar confirmación de conexión del dispositivo.',
+                    style: const TextStyle(color: Color(0xFF9DB0C1)),
+                  ),
+                  trailing: Icon(
+                    _connectionVerified
+                        ? Icons.check_circle_rounded
+                        : Icons.chevron_right_rounded,
+                    color: _connectionVerified
+                        ? const Color(0xFF20D76D)
+                        : Colors.white,
+                  ),
+                  onTap: () {
+                    setState(() {
+                      _connectionVerified = true;
+                    });
+                  },
+                ),
+              ),
+              if (_connectionVerified) ...[
+                const SizedBox(height: 14),
+                Card(
+                  color: const Color(0xFF061A2E),
+                  child: ListTile(
+                    leading: const Icon(
+                      Icons.thermostat_rounded,
+                      color: Color(0xFF00A8FF),
+                    ),
+                    title: const Text(
+                      '4. Detectar sondas',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    subtitle: Text(
+                      _sensorsDetected
+                          ? 'Se detectaron 2 sondas DS18B20.'
+                          : 'Buscar sensores conectados al bus OneWire.',
+                      style: const TextStyle(color: Color(0xFF9DB0C1)),
+                    ),
+                    trailing: Icon(
+                      _sensorsDetected
+                          ? Icons.check_circle_rounded
+                          : Icons.chevron_right_rounded,
+                      color: _sensorsDetected
+                          ? const Color(0xFF20D76D)
+                          : Colors.white,
+                    ),
+                    onTap: () {
+                      setState(() {
+                        _sensorsDetected = true;
+                      });
+                    },
+                  ),
+                ),
+                if (_sensorsDetected) ...[
+                  const SizedBox(height: 14),
+                  Card(
+                    color: const Color(0xFF061A2E),
+                    child: ListTile(
+                      leading: const Icon(
+                        Icons.cable_rounded,
+                        color: Color(0xFF00A8FF),
+                      ),
+                      title: const Text(
+                        '5. Asignar roles de sondas',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      subtitle: Text(
+                        _sensorRolesAssigned
+                            ? 'Roles asignados: cámara y evaporador.'
+                            : 'Indicar qué sonda corresponde a cada parte del equipo.',
+                        style: const TextStyle(color: Color(0xFF9DB0C1)),
+                      ),
+                      trailing: Icon(
+                        _sensorRolesAssigned
+                            ? Icons.check_circle_rounded
+                            : Icons.chevron_right_rounded,
+                        color: _sensorRolesAssigned
+                            ? const Color(0xFF20D76D)
+                            : Colors.white,
+                      ),
+                      onTap: () async {
+                        final result =
+                            await showModalBottomSheet<Map<String, String>>(
+                              context: context,
+                              isScrollControlled: true,
+                              backgroundColor: const Color(0xFF020B14),
+                              builder: (context) {
+                                return _AssignSensorRolesSheet(
+                                  sensors: _mockDetectedSensors,
+                                  initialRoles: _assignedSensorRoles,
+                                );
+                              },
+                            );
+
+                        if (result == null) return;
+
+                        setState(() {
+                          _assignedSensorRoles = result;
+                          _sensorRolesAssigned = true;
+                        });
+                      },
+                    ),
+                  ),
+                ],
+              ],
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ActiveInstallationsList extends StatelessWidget {
+  const _ActiveInstallationsList();
+
+  @override
+  Widget build(BuildContext context) {
+    final query = FirebaseFirestore.instance
+        .collection('installations')
+        .where('status', isEqualTo: 'in_progress');
+
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: query.snapshots(),
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return const Text(
+            'Error cargando instalaciones en progreso',
+            style: TextStyle(color: Colors.redAccent),
+          );
+        }
+
+        if (!snapshot.hasData) {
+          return const Center(child: CircularProgressIndicator());
+        }
+
+        final installations = snapshot.data!.docs;
+
+        if (installations.isEmpty) {
+          return const Text(
+            'No hay instalaciones en progreso.',
+            style: TextStyle(color: Color(0xFF9DB0C1)),
+          );
+        }
+
+        return Column(
+          children: installations.map((doc) {
+            final data = doc.data();
+
+            final equipmentName =
+                data['equipment_name_at_installation']?.toString() ??
+                'Equipo sin nombre';
+
+            final phase = data['phase']?.toString() ?? 'fase desconocida';
+            final deviceId = data['device_id']?.toString() ?? 'sin device_id';
+
+            return Card(
+              color: const Color(0xFF061A2E),
+              margin: const EdgeInsets.only(bottom: 12),
+              child: ListTile(
+                leading: const Icon(
+                  Icons.build_circle_rounded,
+                  color: Color(0xFF00A8FF),
+                ),
+                title: Text(
+                  equipmentName,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                subtitle: Text(
+                  '$deviceId · $phase',
+                  style: const TextStyle(color: Color(0xFF9DB0C1)),
+                ),
+                trailing: const Icon(
+                  Icons.play_arrow_rounded,
+                  color: Colors.white,
+                ),
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) =>
+                          InstallationWizardPage(installationId: doc.id),
+                    ),
+                  );
+                },
+              ),
+            );
+          }).toList(),
+        );
+      },
+    );
+  }
+}
+
+class _WifiConfigSheet extends StatefulWidget {
+  const _WifiConfigSheet();
+
+  @override
+  State<_WifiConfigSheet> createState() => _WifiConfigSheetState();
+}
+
+class _WifiConfigSheetState extends State<_WifiConfigSheet> {
+  final _passwordController = TextEditingController();
+
+  String? _selectedSsid;
+  String? _error;
+
+  final List<String> _mockWifiNetworks = [
+    'QueseriaCentro',
+    'Netlife-Oficina',
+    'CNT-1234',
+    'SmartCold-Test',
+  ];
+
+  @override
+  void dispose() {
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final password = _passwordController.text.trim();
+
+    if (_selectedSsid == null || _selectedSsid!.isEmpty) {
+      setState(() {
+        _error = 'Selecciona una red WiFi';
+      });
+      return;
+    }
+
+    if (password.isEmpty) {
+      setState(() {
+        _error = 'Ingresa la contraseña WiFi';
+      });
+      return;
+    }
+
+    Navigator.pop(context, _selectedSsid);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: 16,
+          right: 16,
+          top: 16,
+          bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Configurar WiFi',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 14),
+            const Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'Redes detectadas',
+                style: TextStyle(
+                  color: Color(0xFF9DB0C1),
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            ..._mockWifiNetworks.map((ssid) {
+              final selected = _selectedSsid == ssid;
+
+              return Card(
+                color: const Color(0xFF061A2E),
+                child: ListTile(
+                  leading: Icon(
+                    selected ? Icons.check_circle_rounded : Icons.wifi_rounded,
+                    color: const Color(0xFF00A8FF),
+                  ),
+                  title: Text(
+                    ssid,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  onTap: () {
+                    setState(() {
+                      _selectedSsid = ssid;
+                      _error = null;
+                    });
+                  },
+                ),
+              );
+            }),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _passwordController,
+              obscureText: true,
+              onSubmitted: (_) => _submit(),
+              decoration: const InputDecoration(
+                labelText: 'Contraseña',
+                prefixIcon: Icon(Icons.lock_rounded),
+                border: OutlineInputBorder(),
+              ),
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: 10),
+              Text(_error!, style: const TextStyle(color: Colors.redAccent)),
+            ],
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _submit,
+                icon: const Icon(Icons.send_rounded),
+                label: const Text('Enviar al dispositivo'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AssignSensorRolesSheet extends StatefulWidget {
+  const _AssignSensorRolesSheet({
+    required this.sensors,
+    required this.initialRoles,
+  });
+
+  final List<String> sensors;
+  final Map<String, String> initialRoles;
+
+  @override
+  State<_AssignSensorRolesSheet> createState() =>
+      _AssignSensorRolesSheetState();
+}
+
+class _AssignSensorRolesSheetState extends State<_AssignSensorRolesSheet> {
+  late Map<String, String> _rolesBySensor;
+
+  final List<String> _availableRoles = ['camara', 'evaporador', 'ambiente'];
+
+  @override
+  void initState() {
+    super.initState();
+    _rolesBySensor = Map<String, String>.from(widget.initialRoles);
+  }
+
+  void _submit() {
+    final hasCamera = _rolesBySensor.containsValue('camara');
+    final hasEvaporator = _rolesBySensor.containsValue('evaporador');
+
+    if (!hasCamera || !hasEvaporator) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Debes asignar cámara y evaporador.')),
+      );
+      return;
+    }
+
+    Navigator.pop(context, _rolesBySensor);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: 16,
+          right: 16,
+          top: 16,
+          bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text(
+              'Asignar roles de sondas',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 12),
+            ...widget.sensors.map((sensorId) {
+              return Card(
+                color: const Color(0xFF061A2E),
+                child: ListTile(
+                  leading: const Icon(
+                    Icons.thermostat_rounded,
+                    color: Color(0xFF00A8FF),
+                  ),
+                  title: Text(
+                    sensorId,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  subtitle: DropdownButtonHideUnderline(
+                    child: DropdownButton<String>(
+                      value: _rolesBySensor[sensorId],
+                      hint: const Text(
+                        'Seleccionar rol',
+                        style: TextStyle(color: Color(0xFF9DB0C1)),
+                      ),
+                      dropdownColor: const Color(0xFF061A2E),
+                      isExpanded: true,
+                      items: _availableRoles.map((role) {
+                        return DropdownMenuItem<String>(
+                          value: role,
+                          child: Text(
+                            role,
+                            style: const TextStyle(color: Colors.white),
+                          ),
+                        );
+                      }).toList(),
+                      onChanged: (value) {
+                        if (value == null) return;
+
+                        setState(() {
+                          _rolesBySensor.removeWhere(
+                            (sensor, role) => role == value,
+                          );
+                          _rolesBySensor[sensorId] = value;
+                        });
+                      },
+                    ),
+                  ),
+                ),
+              );
+            }),
+            const SizedBox(height: 14),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _submit,
+                icon: const Icon(Icons.check_rounded),
+                label: const Text('Guardar roles'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class ContinueInstallationPage extends StatelessWidget {
+  const ContinueInstallationPage({
+    super.key,
+    required this.installationId,
+    required this.installationData,
+  });
+
+  final String installationId;
+  final Map<String, dynamic> installationData;
+
+  @override
+  Widget build(BuildContext context) {
+    final deviceId =
+        installationData['device_id']?.toString() ?? 'Sin device_id';
+    final phase = installationData['phase']?.toString() ?? 'Fase desconocida';
+    final status =
+        installationData['status']?.toString() ?? 'Estado desconocido';
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF020B14),
+      appBar: AppBar(
+        title: const Text('Continuar instalación'),
+        backgroundColor: const Color(0xFF061A2E),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          _AccountInfoTile(
+            icon: Icons.memory_rounded,
+            title: 'Dispositivo',
+            value: deviceId,
+          ),
+          _AccountInfoTile(
+            icon: Icons.timeline_rounded,
+            title: 'Fase actual',
+            value: phase,
+          ),
+          _AccountInfoTile(
+            icon: Icons.info_rounded,
+            title: 'Estado',
+            value: status,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class InstallationWizardPage extends StatelessWidget {
+  const InstallationWizardPage({super.key, required this.installationId});
+
+  final String installationId;
+
+  @override
+  Widget build(BuildContext context) {
+    final installationRef = FirebaseFirestore.instance
+        .collection('installations')
+        .doc(installationId);
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF020B14),
+      appBar: AppBar(
+        title: const Text('Asistente de instalación'),
+        backgroundColor: const Color(0xFF061A2E),
+      ),
+      body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+        stream: installationRef.snapshots(),
+        builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return const Center(
+              child: Text(
+                'Error cargando instalación',
+                style: TextStyle(color: Colors.white),
+              ),
+            );
+          }
+
+          if (!snapshot.hasData) {
+            return const Center(child: CircularProgressIndicator());
+          }
+
+          final data = snapshot.data!.data();
+
+          if (data == null) {
+            return const Center(
+              child: Text(
+                'Instalación no encontrada',
+                style: TextStyle(color: Colors.white),
+              ),
+            );
+          }
+
+          final deviceId = data['device_id']?.toString() ?? 'Sin device_id';
+          final phase = data['phase']?.toString() ?? 'Sin fase';
+          final status = data['status']?.toString() ?? 'Sin estado';
+
+          final wifiConfigured = data['wifi_configured'] == true;
+          final sensorsDetected = data['sensors_detected'] == true;
+          final sensorsAssigned = data['sensors_assigned'] == true;
+          final parametersConfigured = data['parameters_configured'] == true;
+          final testsCompleted = data['tests_completed'] == true;
+
+          return ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              _AccountInfoTile(
+                icon: Icons.memory_rounded,
+                title: 'Dispositivo',
+                value: deviceId,
+              ),
+              _AccountInfoTile(
+                icon: Icons.timeline_rounded,
+                title: 'Fase actual',
+                value: phase,
+              ),
+              _AccountInfoTile(
+                icon: Icons.info_rounded,
+                title: 'Estado',
+                value: status,
+              ),
+              const SizedBox(height: 18),
+              const Text(
+                'Progreso de instalación',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 10),
+              _InstallationStepTile(
+                number: 1,
+                title: 'WiFi configurado',
+                subtitle: wifiConfigured
+                    ? 'El dispositivo ya tiene WiFi configurado.'
+                    : 'Pendiente configurar WiFi.',
+                completed: wifiConfigured,
+              ),
+              _InstallationStepTile(
+                number: 2,
+                title: 'Sensores detectados',
+                subtitle: sensorsDetected
+                    ? 'El dispositivo ya detectó sensores.'
+                    : 'Pendiente detectar sensores.',
+                completed: sensorsDetected,
+              ),
+              _InstallationStepTile(
+                number: 3,
+                title: 'Roles de sensores',
+                subtitle: sensorsAssigned
+                    ? 'Los sensores ya tienen roles asignados.'
+                    : 'Pendiente asignar roles.',
+                completed: sensorsAssigned,
+                onTap: () async {
+                  final detectedSensorsRaw = data['detected_sensors'];
+
+                  final sensors = detectedSensorsRaw is List
+                      ? detectedSensorsRaw
+                            .map((item) => item.toString())
+                            .toList()
+                      : <String>[];
+
+                  if (sensors.isEmpty) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'No hay sensores detectados para asignar.',
+                        ),
+                      ),
+                    );
+                    return;
+                  }
+
+                  final currentRolesRaw = data['sensor_roles'];
+                  final currentRoles = currentRolesRaw is Map
+                      ? currentRolesRaw.map(
+                          (key, value) =>
+                              MapEntry(key.toString(), value.toString()),
+                        )
+                      : <String, String>{};
+
+                  final result =
+                      await showModalBottomSheet<Map<String, String>>(
+                        context: context,
+                        isScrollControlled: true,
+                        backgroundColor: const Color(0xFF020B14),
+                        builder: (context) {
+                          return _AssignSensorRolesSheet(
+                            sensors: sensors,
+                            initialRoles: currentRoles,
+                          );
+                        },
+                      );
+
+                  if (result == null) return;
+
+                  await installationRef.update({
+                    'sensor_roles': result,
+                    'sensors_assigned': true,
+                    'phase': 'pending_parameters',
+                    'updated_at': FieldValue.serverTimestamp(),
+                  });
+                },
+              ),
+              _InstallationStepTile(
+                number: 4,
+                title: 'Parámetros',
+                subtitle: parametersConfigured
+                    ? 'Parámetros configurados.'
+                    : 'Pendiente configurar parámetros.',
+                completed: parametersConfigured,
+              ),
+              _InstallationStepTile(
+                number: 5,
+                title: 'Pruebas',
+                subtitle: testsCompleted
+                    ? 'Pruebas completadas.'
+                    : 'Pendiente realizar pruebas.',
+                completed: testsCompleted,
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _InstallationStepTile extends StatelessWidget {
+  const _InstallationStepTile({
+    required this.number,
+    required this.title,
+    required this.subtitle,
+    required this.completed,
+    this.onTap,
+  });
+
+  final int number;
+  final String title;
+  final String subtitle;
+  final bool completed;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      color: const Color(0xFF061A2E),
+      margin: const EdgeInsets.only(bottom: 12),
+      child: ListTile(
+        onTap: onTap,
+        leading: CircleAvatar(
+          backgroundColor: completed
+              ? const Color(0xFF20D76D)
+              : const Color(0xFF00A8FF),
+          child: completed
+              ? const Icon(Icons.check_rounded, color: Colors.white)
+              : Text(
+                  '$number',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+        ),
+        title: Text(
+          title,
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+        subtitle: Text(
+          subtitle,
+          style: const TextStyle(color: Color(0xFF9DB0C1)),
+        ),
       ),
     );
   }
