@@ -6,6 +6,9 @@
 #include <Preferences.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <WebServer.h>
+#include "nvs_flash.h"
+
 bool tieneConfiguracionOperativa();
 const bool BORRAR_WIFI_AL_INICIAR = false;
 const bool BORRAR_CONFIG_SMARTCOLD_AL_INICIAR = false;
@@ -108,9 +111,45 @@ unsigned long compressorLastOffMillis = 0;
 bool localProtectionActive = false;
 unsigned long localProtectionStartMillis = 0;
 WiFiManager wifiManager;
+WebServer servidorInstalacion(80);
+bool modoInstalacionLocalActivo = false;
 float obtenerTemperaturaPorRole(String role);
-Preferences preferences;
 
+Preferences preferences;
+String wifiPendienteSsid = "";
+String wifiPendientePassword = "";
+bool wifiConfiguracionPendiente = false;
+String wifiEstadoSsid = "";
+String wifiEstado = "idle";
+String wifiUltimoError = "";
+bool wifiBackendVerificado = false;
+unsigned long wifiProcesarDespuesDeMs = 0;
+String installationPhase = "wifi_setup";
+bool installationWifiConfigured = false;
+bool installationConnectionVerified = false;
+String installationWifiSsid = "";
+bool installationSensorsDetected = false;
+bool installationSensorsAssigned = false;
+
+void guardarEstadoInstalacionLocal()
+{
+  preferences.putString("inst_phase", installationPhase);
+  preferences.putBool("inst_wifi_ok", installationWifiConfigured);
+  preferences.putBool("inst_cloud_ok", installationConnectionVerified);
+  preferences.putString("inst_ssid", installationWifiSsid);
+  preferences.putBool("inst_sens_det", installationSensorsDetected);
+  preferences.putBool("inst_sens_asg", installationSensorsAssigned);
+}
+
+void cargarEstadoInstalacionLocal()
+{
+  installationPhase = preferences.getString("inst_phase", "wifi_setup");
+  installationWifiConfigured = preferences.getBool("inst_wifi_ok", false);
+  installationConnectionVerified = preferences.getBool("inst_cloud_ok", false);
+  installationWifiSsid = preferences.getString("inst_ssid", "");
+  installationSensorsDetected = preferences.getBool("inst_sens_det", false);
+  installationSensorsAssigned = preferences.getBool("inst_sens_asg", false);
+}
 void descargarConfiguracion();
 
 String obtenerEstadoOperativo()
@@ -1428,6 +1467,318 @@ void cargarSensoresConfiguradosDesdeMemoria()
   Serial.print("Sensores configurados cargados desde memoria: ");
   Serial.println(cantidadSensoresConfigurados);
 }
+void responderDeviceInfo()
+{
+  leerTemperaturasDS18B20();
+
+  StaticJsonDocument<1536> doc;
+
+  bool configurado = tieneConfiguracionOperativa();
+
+  doc["device_id"] = DEVICE_ID;
+  doc["hardware_uid"] = HARDWARE_UID;
+  doc["firmware_version"] = FIRMWARE_VERSION;
+
+  doc["configured"] = configurado;
+  doc["provisioning_status"] = configurado ? "configured" : "pending_installation";
+
+  doc["installation_phase"] = configurado ? "completed" : installationPhase;
+  doc["wifi_configured"] = installationWifiConfigured;
+  doc["connection_verified"] = installationConnectionVerified;
+  doc["configured_wifi_ssid"] = installationWifiSsid;
+  doc["sensors_detected"] = installationSensorsDetected;
+  doc["sensors_assigned"] = installationSensorsAssigned;
+
+  doc["local_installation_mode"] = modoInstalacionLocalActivo;
+  doc["wifi_status"] = wifiEstado;
+  doc["wifi_error"] = wifiUltimoError;
+  doc["wifi_backend_verified"] = wifiBackendVerificado;
+
+  JsonArray detectedSensors = doc["detected_sensors"].to<JsonArray>();
+
+  for (int i = 0; i < cantidadSensoresDetectados; i++)
+  {
+    detectedSensors.add(sensoresDetectados[i]);
+  }
+
+  String respuesta;
+  serializeJson(doc, respuesta);
+
+  servidorInstalacion.send(200, "application/json", respuesta);
+}
+
+void restaurarModoInstalacionLocal()
+{
+  Serial.println("🔁 Restaurando modo instalacion local...");
+
+  WiFi.disconnect(false);
+  delay(300);
+
+  WiFi.mode(WIFI_AP);
+  delay(300);
+
+  IPAddress localIp(192, 168, 4, 1);
+  IPAddress gateway(192, 168, 4, 1);
+  IPAddress subnet(255, 255, 255, 0);
+
+  WiFi.softAPConfig(localIp, gateway, subnet);
+
+  bool apOk = WiFi.softAP(DEVICE_ID.c_str(), nullptr, 6, false, 4);
+
+  if (apOk)
+  {
+    Serial.print("✅ AP restaurado: ");
+    Serial.println(WiFi.softAPSSID());
+    Serial.print("IP AP: ");
+    Serial.println(WiFi.softAPIP());
+  }
+  else
+  {
+    Serial.println("❌ No se pudo restaurar AP SmartCold.");
+  }
+}
+
+void responderWifiScan()
+{
+  Serial.println("📡 Escaneando redes WiFi desde ESP...");
+
+  WiFi.mode(WIFI_AP_STA);
+  delay(300);
+
+  int redes = WiFi.scanNetworks(false, true);
+
+  JsonDocument doc;
+  JsonArray lista = doc["networks"].to<JsonArray>();
+
+  for (int i = 0; i < redes; i++)
+  {
+    String ssid = WiFi.SSID(i);
+
+    if (ssid.length() == 0)
+    {
+      continue;
+    }
+
+    JsonObject red = lista.add<JsonObject>();
+    red["ssid"] = ssid;
+    red["rssi"] = WiFi.RSSI(i);
+    red["secure"] = WiFi.encryptionType(i) != WIFI_AUTH_OPEN;
+  }
+
+  WiFi.scanDelete();
+
+  String respuesta;
+  serializeJson(doc, respuesta);
+
+  servidorInstalacion.send(200, "application/json", respuesta);
+}
+
+void responderWifiConfigure()
+{
+  if (servidorInstalacion.method() != HTTP_POST)
+  {
+    servidorInstalacion.send(405, "application/json", "{\"success\":false,\"error\":\"METHOD_NOT_ALLOWED\"}");
+    return;
+  }
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, servidorInstalacion.arg("plain"));
+
+  if (error)
+  {
+    servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"INVALID_JSON\"}");
+    return;
+  }
+
+  String ssid = doc["ssid"] | "";
+  String password = doc["password"] | "";
+
+  ssid.trim();
+  password.trim();
+
+  if (ssid.length() == 0)
+  {
+    servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"SSID_REQUIRED\"}");
+    return;
+  }
+
+  wifiPendienteSsid = ssid;
+  wifiPendientePassword = password;
+  wifiConfiguracionPendiente = true;
+  wifiProcesarDespuesDeMs = millis() + 2000;
+
+  wifiEstadoSsid = ssid;
+  wifiEstado = "received";
+  wifiUltimoError = "";
+  wifiBackendVerificado = false;
+
+  Serial.println("📶 WiFi recibido desde app SmartCold.");
+  Serial.print("SSID pendiente: ");
+  Serial.println(wifiPendienteSsid);
+
+  servidorInstalacion.send(200, "application/json", "{\"success\":true,\"status\":\"wifi_received\"}");
+}
+
+void ejecutarFactoryResetCompleto()
+{
+  Serial.println("🧨 FACTORY RESET SMARTCOLD INICIADO");
+
+  WiFi.disconnect(true, true);
+  delay(300);
+
+  wifiManager.resetSettings();
+  delay(300);
+
+  esp_err_t eraseResult = nvs_flash_erase();
+
+  if (eraseResult == ESP_OK)
+  {
+    Serial.println("🧹 NVS borrada correctamente.");
+  }
+  else
+  {
+    Serial.print("⚠️ Error borrando NVS: ");
+    Serial.println(eraseResult);
+  }
+
+  nvs_flash_init();
+
+  Serial.println("✅ Factory reset completo. Reiniciando ESP...");
+  delay(1000);
+
+  ESP.restart();
+}
+
+void responderFactoryReset()
+{
+  servidorInstalacion.send(
+      200,
+      "application/json",
+      "{\"success\":true,\"message\":\"factory_reset_started\"}");
+
+  delay(1000);
+  ejecutarFactoryResetCompleto();
+}
+
+void responderWifiStatus()
+{
+  JsonDocument doc;
+
+  doc["success"] = true;
+  doc["ssid"] = wifiEstadoSsid;
+  doc["status"] = wifiEstado;
+  doc["connected"] = WiFi.status() == WL_CONNECTED;
+  doc["backend_verified"] = wifiBackendVerificado;
+  doc["error"] = wifiUltimoError;
+  doc["ip"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
+  doc["rssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
+
+  String respuesta;
+  serializeJson(doc, respuesta);
+
+  servidorInstalacion.send(200, "application/json", respuesta);
+}
+
+void iniciarModoInstalacionLocal()
+{
+  String nombreAP = DEVICE_ID;
+
+  Serial.println("📡 Iniciando modo instalacion local SmartCold...");
+  Serial.print("AP: ");
+  Serial.println(nombreAP);
+
+  WiFi.disconnect(false, false);
+  delay(500);
+
+  WiFi.mode(WIFI_AP);
+  delay(500);
+
+  IPAddress localIp(192, 168, 4, 1);
+  IPAddress gateway(192, 168, 4, 1);
+  IPAddress subnet(255, 255, 255, 0);
+
+  WiFi.softAPConfig(localIp, gateway, subnet);
+
+  bool apOk = WiFi.softAP(
+      nombreAP.c_str(),
+      nullptr,
+      6,
+      false,
+      4);
+
+  if (!apOk)
+  {
+    Serial.println("❌ ERROR iniciando AP SmartCold");
+    return;
+  }
+
+  Serial.print("✅ AP iniciado correctamente: ");
+  Serial.println(WiFi.softAPSSID());
+
+  Serial.print("IP AP: ");
+  Serial.println(WiFi.softAPIP());
+
+  servidorInstalacion.on("/api/device-info", HTTP_GET, responderDeviceInfo);
+  servidorInstalacion.on("/api/wifi/scan", HTTP_GET, responderWifiScan);
+  servidorInstalacion.on("/api/wifi/configure", HTTP_POST, responderWifiConfigure);
+  servidorInstalacion.on("/api/wifi/status", HTTP_GET, responderWifiStatus);
+  servidorInstalacion.on("/api/factory-reset", HTTP_POST, responderFactoryReset);
+
+  servidorInstalacion.begin();
+
+  modoInstalacionLocalActivo = true;
+
+  Serial.println("✅ API local de instalacion activa");
+}
+
+void iniciarModoInstalacionLocalConWifiCliente()
+{
+  String nombreAP = DEVICE_ID;
+
+  Serial.println("📡 Iniciando AP local SmartCold sin desconectar WiFi cliente...");
+  Serial.print("AP: ");
+  Serial.println(nombreAP);
+
+  WiFi.mode(WIFI_AP_STA);
+  delay(500);
+
+  IPAddress localIp(192, 168, 4, 1);
+  IPAddress gateway(192, 168, 4, 1);
+  IPAddress subnet(255, 255, 255, 0);
+
+  WiFi.softAPConfig(localIp, gateway, subnet);
+
+  bool apOk = WiFi.softAP(
+      nombreAP.c_str(),
+      nullptr,
+      6,
+      false,
+      4);
+
+  if (!apOk)
+  {
+    Serial.println("❌ ERROR iniciando AP SmartCold");
+    return;
+  }
+
+  Serial.print("✅ AP iniciado correctamente: ");
+  Serial.println(WiFi.softAPSSID());
+
+  Serial.print("IP AP: ");
+  Serial.println(WiFi.softAPIP());
+
+  servidorInstalacion.on("/api/device-info", HTTP_GET, responderDeviceInfo);
+  servidorInstalacion.on("/api/wifi/scan", HTTP_GET, responderWifiScan);
+  servidorInstalacion.on("/api/wifi/configure", HTTP_POST, responderWifiConfigure);
+  servidorInstalacion.on("/api/wifi/status", HTTP_GET, responderWifiStatus);
+  servidorInstalacion.on("/api/factory-reset", HTTP_POST, responderFactoryReset);
+
+  servidorInstalacion.begin();
+
+  modoInstalacionLocalActivo = true;
+
+  Serial.println("✅ API local de instalacion activa con WiFi cliente conectado");
+}
 
 void setup()
 {
@@ -1449,6 +1800,7 @@ void setup()
   detectarSensoresDS18B20();
 
   preferences.begin("smartcold", false);
+  cargarEstadoInstalacionLocal();
   pinMode(compressorOutputPin, OUTPUT);
   digitalWrite(compressorOutputPin, LOW);
 
@@ -1534,32 +1886,46 @@ void setup()
     wifiManager.resetSettings();
   }
 
-  String nombreAP = DEVICE_ID;
+  Serial.println("📶 Intentando conectar con WiFi guardado...");
 
-  Serial.println("Iniciando portal WiFiManager...");
-  Serial.print("Red configuracion: ");
-  Serial.println(nombreAP);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin();
 
-  wifiManager.setConnectTimeout(30);
-  wifiManager.setConfigPortalTimeout(180);
+  unsigned long inicioWifi = millis();
 
-  bool conectado = wifiManager.autoConnect(nombreAP.c_str());
-
-  if (!conectado)
+  while (WiFi.status() != WL_CONNECTED && millis() - inicioWifi < 8000)
   {
-    Serial.println("❌ No se pudo conectar. Reiniciando...");
-    delay(3000);
-    ESP.restart();
+    delay(500);
+    Serial.print(".");
   }
 
-  Serial.println("✅ WIFI CONECTADO");
-  Serial.print("SSID: ");
-  Serial.println(WiFi.SSID());
-  Serial.print("IP: ");
-  Serial.println(WiFi.localIP());
-  Serial.print("RSSI: ");
-  Serial.println(WiFi.RSSI());
-  descargarConfiguracion();
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    Serial.println();
+    Serial.println("✅ WIFI CONECTADO");
+    Serial.print("SSID: ");
+    Serial.println(WiFi.SSID());
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("RSSI: ");
+    Serial.println(WiFi.RSSI());
+
+    descargarConfiguracion();
+
+    if (!tieneConfiguracionOperativa())
+    {
+      Serial.println("⚙️ Equipo con WiFi, pero instalación pendiente. Activando AP local.");
+      iniciarModoInstalacionLocalConWifiCliente();
+    }
+  }
+  else
+  {
+    Serial.println();
+    Serial.println("⚙️ Sin WiFi guardado. Entrando en modo instalacion local.");
+    iniciarModoInstalacionLocal();
+  }
 
   leerTemperaturasDS18B20();
   evaluarAlarmasSensores();
@@ -1586,7 +1952,127 @@ void verificarConexionWifi()
 
 void loop()
 {
-  leerTemperaturasDS18B20();
+  if (modoInstalacionLocalActivo)
+  {
+    servidorInstalacion.handleClient();
+    static unsigned long ultimaLecturaInstalacion = 0;
+    static unsigned long ultimaTelemetriaInstalacion = 0;
+    static unsigned long ultimaConfigInstalacion = 0;
+    if (wifiConfiguracionPendiente && millis() >= wifiProcesarDespuesDeMs)
+    {
+      wifiConfiguracionPendiente = false;
+      wifiEstado = "connecting";
+      wifiUltimoError = "";
+      wifiBackendVerificado = false;
+
+      Serial.println("📶 Procesando WiFi pendiente...");
+      Serial.print("SSID: ");
+      Serial.println(wifiPendienteSsid);
+
+      WiFi.mode(WIFI_AP_STA);
+      delay(500);
+
+      WiFi.disconnect(false);
+      delay(500);
+
+      WiFi.persistent(false);
+      WiFi.begin(wifiPendienteSsid.c_str(), wifiPendientePassword.c_str());
+
+      unsigned long inicioWifi = millis();
+
+      while (WiFi.status() != WL_CONNECTED && millis() - inicioWifi < 20000)
+      {
+        servidorInstalacion.handleClient();
+        delay(250);
+        Serial.print(".");
+      }
+
+      Serial.println();
+
+      if (WiFi.status() == WL_CONNECTED)
+      {
+        wifiEstado = "connected";
+        wifiUltimoError = "";
+        wifiBackendVerificado = false;
+
+        Serial.println("✅ WIFI CONFIGURADO DESDE APP");
+        Serial.print("IP STA: ");
+        Serial.println(WiFi.localIP());
+
+        unsigned long inicioAvisoConectado = millis();
+
+        while (millis() - inicioAvisoConectado < 3000)
+        {
+          servidorInstalacion.handleClient();
+          delay(50);
+        }
+
+        wifiBackendVerificado = true;
+        wifiEstado = "backend_verified";
+
+        Serial.println("✅ WIFI Y BACKEND MARCADOS COMO VERIFICADOS PARA LA APP");
+        installationWifiConfigured = true;
+        installationConnectionVerified = true;
+        installationWifiSsid = WiFi.SSID();
+        installationPhase = "pending_sensor_detection";
+
+        guardarEstadoInstalacionLocal();
+        unsigned long inicioAvisoBackend = millis();
+
+        while (millis() - inicioAvisoBackend < 8000)
+        {
+          servidorInstalacion.handleClient();
+          delay(50);
+        }
+
+        ultimaTelemetriaInstalacion = millis();
+        ultimaConfigInstalacion = millis();
+      }
+      else
+      {
+        Serial.println("❌ No se pudo conectar al WiFi recibido desde app.");
+
+        wifiEstado = "error";
+        wifiUltimoError = "WIFI_CONNECTION_FAILED";
+        wifiBackendVerificado = false;
+
+        unsigned long inicioAvisoError = millis();
+
+        while (millis() - inicioAvisoError < 5000)
+        {
+          servidorInstalacion.handleClient();
+          delay(50);
+        }
+
+        restaurarModoInstalacionLocal();
+      }
+    }
+
+    if (millis() - ultimaLecturaInstalacion >= 5000)
+    {
+      ultimaLecturaInstalacion = millis();
+      leerTemperaturasDS18B20();
+      Serial.println("⚙️ Modo instalacion local activo. AP/API esperando app.");
+    }
+
+    if (WiFi.status() == WL_CONNECTED)
+    {
+      if (millis() - ultimaTelemetriaInstalacion >= 30000)
+      {
+        ultimaTelemetriaInstalacion = millis();
+        enviarTelemetria();
+      }
+
+      if (millis() - ultimaConfigInstalacion >= INTERVALO_CONFIG_MS)
+      {
+        ultimaConfigInstalacion = millis();
+        descargarConfiguracion();
+      }
+    }
+
+    delay(10);
+    return;
+  }
 
   bool configurado = tieneConfiguracionOperativa();
 

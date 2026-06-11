@@ -38,6 +38,8 @@ dependencies:
   cloud_firestore: ^5.6.12
   http: ^1.6.0
   firebase_auth: ^5.7.0
+  wifi_scan: ^0.4.1+2
+  wifi_iot: ^0.3.19+2
 
 dev_dependencies:
   flutter_test:

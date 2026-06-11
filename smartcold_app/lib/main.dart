@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:wifi_scan/wifi_scan.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:wifi_iot/wifi_iot.dart';
 
 import 'firebase_options.dart';
 
@@ -4137,19 +4139,6 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
 
   Map<String, String>? _selectedDevice;
 
-  final List<Map<String, String>> _mockDetectedDevices = [
-    {
-      'device_id': 'SmartCold-2CBB74C55494',
-      'hardware_uid': '2CBB74C55494',
-      'firmware_version': '1.0.0',
-    },
-    {
-      'device_id': 'SmartCold-A1B2C3D4E5F6',
-      'hardware_uid': 'A1B2C3D4E5F6',
-      'firmware_version': '1.0.0',
-    },
-  ];
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -4178,18 +4167,6 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
               fontWeight: FontWeight.w600,
             ),
           ),
-          const SizedBox(height: 18),
-          const SizedBox(height: 18),
-          const Text(
-            'Instalaciones en progreso',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 18,
-              fontWeight: FontWeight.w900,
-            ),
-          ),
-          const SizedBox(height: 10),
-          const _ActiveInstallationsList(),
           const SizedBox(height: 18),
           Card(
             color: const Color(0xFF061A2E),
@@ -4220,69 +4197,242 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
                     : const Color(0xFF20D76D),
               ),
               onTap: () async {
-                final selected =
-                    await showModalBottomSheet<Map<String, String>>(
-                      context: context,
-                      backgroundColor: const Color(0xFF020B14),
-                      builder: (context) {
-                        return SafeArea(
-                          child: ListView(
-                            padding: const EdgeInsets.all(16),
-                            children: [
-                              const Text(
-                                'Dispositivos SmartCold detectados',
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 20,
-                                  fontWeight: FontWeight.w900,
-                                ),
-                              ),
-                              const SizedBox(height: 12),
-                              ..._mockDetectedDevices.map((device) {
-                                return Card(
-                                  color: const Color(0xFF061A2E),
-                                  child: ListTile(
-                                    leading: const Icon(
-                                      Icons.memory_rounded,
-                                      color: Color(0xFF00A8FF),
-                                    ),
-                                    title: Text(
-                                      device['device_id'] ??
-                                          'SmartCold desconocido',
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.w900,
-                                      ),
-                                    ),
-                                    subtitle: Text(
-                                      'Firmware ${device['firmware_version']}',
-                                      style: const TextStyle(
-                                        color: Color(0xFF9DB0C1),
-                                      ),
-                                    ),
-                                    onTap: () {
-                                      Navigator.pop(context, device);
-                                    },
+                var blockingVisible = false;
+
+                void showMessage(String message) {
+                  if (blockingVisible) {
+                    _closeBlockingMessage();
+                    blockingVisible = false;
+                  }
+
+                  _showBlockingMessage(message);
+                  blockingVisible = true;
+                }
+
+                void closeMessage() {
+                  if (blockingVisible) {
+                    _closeBlockingMessage();
+                    blockingVisible = false;
+                  }
+                }
+
+                try {
+                  showMessage('Buscando dispositivos SmartCold cercanos...');
+
+                  final devices = await _scanSmartColdDevices();
+
+                  if (!context.mounted) return;
+                  closeMessage();
+
+                  if (devices.isEmpty) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'No se encontraron dispositivos SmartCold cercanos.',
+                        ),
+                      ),
+                    );
+                    return;
+                  }
+
+                  final selected =
+                      await showModalBottomSheet<Map<String, String>>(
+                        context: context,
+                        backgroundColor: const Color(0xFF020B14),
+                        builder: (context) {
+                          return SafeArea(
+                            child: ListView(
+                              padding: const EdgeInsets.all(16),
+                              children: [
+                                const Text(
+                                  'Dispositivos SmartCold detectados',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.w900,
                                   ),
-                                );
-                              }),
-                            ],
+                                ),
+                                const SizedBox(height: 12),
+                                ...devices.map((device) {
+                                  return Card(
+                                    color: const Color(0xFF061A2E),
+                                    child: ListTile(
+                                      leading: const Icon(
+                                        Icons.memory_rounded,
+                                        color: Color(0xFF00A8FF),
+                                      ),
+                                      title: Text(
+                                        device['device_id'] ??
+                                            'SmartCold desconocido',
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.w900,
+                                        ),
+                                      ),
+                                      subtitle: Text(
+                                        'Señal: ${device['rssi'] ?? '—'} dBm',
+                                        style: const TextStyle(
+                                          color: Color(0xFF9DB0C1),
+                                        ),
+                                      ),
+                                      onTap: () {
+                                        Navigator.pop(context, device);
+                                      },
+                                    ),
+                                  );
+                                }),
+                              ],
+                            ),
+                          );
+                        },
+                      );
+
+                  if (selected == null) return;
+
+                  final selectedDeviceId = selected['device_id'];
+
+                  if (selectedDeviceId == null || selectedDeviceId.isEmpty) {
+                    if (!context.mounted) return;
+
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'El dispositivo seleccionado no tiene nombre válido.',
+                        ),
+                      ),
+                    );
+                    return;
+                  }
+
+                  final currentDeviceId = _selectedDevice?['device_id'];
+                  final isSameDevice = currentDeviceId == selectedDeviceId;
+
+                  if (_selectedDevice != null && !isSameDevice) {
+                    final confirmChange = await showDialog<bool>(
+                      context: context,
+                      builder: (context) {
+                        return AlertDialog(
+                          title: const Text('Cambiar dispositivo'),
+                          content: const Text(
+                            'Seleccionaste un dispositivo diferente. Si continúas, se reiniciarán los pasos de WiFi, sensores y roles de esta instalación.',
                           ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(context, false),
+                              child: const Text('Cancelar'),
+                            ),
+                            ElevatedButton(
+                              onPressed: () => Navigator.pop(context, true),
+                              child: const Text('Cambiar dispositivo'),
+                            ),
+                          ],
                         );
                       },
                     );
 
-                if (selected == null) return;
+                    if (confirmChange != true) return;
+                  }
 
-                setState(() {
-                  _selectedDevice = selected;
-                  _wifiConfigured = false;
-                  _connectionVerified = false;
-                  _sensorsDetected = false;
-                  _sensorRolesAssigned = false;
-                  _assignedSensorRoles = {};
-                  _configuredWifiName = null;
-                });
+                  if (!context.mounted) return;
+                  showMessage('Conectando con dispositivo SmartCold...');
+
+                  final connectedToEsp = await _connectToEspAccessPoint(
+                    selectedDeviceId,
+                  );
+
+                  if (!context.mounted) return;
+
+                  if (!connectedToEsp) {
+                    closeMessage();
+
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'No se pudo conectar al dispositivo SmartCold.',
+                        ),
+                      ),
+                    );
+                    return;
+                  }
+
+                  showMessage('Leyendo información del dispositivo...');
+
+                  final deviceInfo = await _fetchEspDeviceInfo(selected);
+
+                  if (!context.mounted) return;
+                  closeMessage();
+
+                  final espConfigured = deviceInfo['configured'] == 'true';
+                  final espWifiConfigured =
+                      deviceInfo['wifi_configured'] == 'true';
+                  final espConnectionVerified =
+                      deviceInfo['connection_verified'] == 'true';
+                  final espSensorsDetected =
+                      deviceInfo['sensors_detected'] == 'true';
+                  final espSensorsAssigned =
+                      deviceInfo['sensors_assigned'] == 'true';
+                  final espWifiSsid = deviceInfo['configured_wifi_ssid'] ?? '';
+
+                  setState(() {
+                    _selectedDevice = deviceInfo;
+
+                    if (espConfigured) {
+                      _wifiConfigured = true;
+                      _connectionVerified = true;
+                      _sensorsDetected = true;
+                      _sensorRolesAssigned = true;
+                      _configuredWifiName = espWifiSsid.isEmpty
+                          ? null
+                          : espWifiSsid;
+                    } else {
+                      _wifiConfigured = espWifiConfigured;
+                      _connectionVerified = espConnectionVerified;
+                      _sensorsDetected = espSensorsDetected;
+                      _sensorRolesAssigned = espSensorsAssigned;
+                      _configuredWifiName = espWifiSsid.isEmpty
+                          ? null
+                          : espWifiSsid;
+
+                      if (!espWifiConfigured) {
+                        _connectionVerified = false;
+                        _sensorsDetected = false;
+                        _sensorRolesAssigned = false;
+                        _assignedSensorRoles = {};
+                        _configuredWifiName = null;
+                      }
+                    }
+                  });
+                  if (espWifiConfigured || espConnectionVerified) {
+                    await _releaseEspAccessPointConnection();
+
+                    if (!context.mounted) return;
+                  }
+                  if (espWifiConfigured) {
+                    await WiFiForIoTPlugin.forceWifiUsage(false);
+                    await WiFiForIoTPlugin.disconnect();
+
+                    if (!context.mounted) return;
+                  }
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        isSameDevice
+                            ? 'Conexión reconfirmada con el dispositivo.'
+                            : 'Conexión exitosa con el dispositivo.',
+                      ),
+                    ),
+                  );
+                } catch (error) {
+                  if (!context.mounted) return;
+
+                  closeMessage();
+
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('Error conectando con dispositivo: $error'),
+                    ),
+                  );
+                }
               },
             ),
           ),
@@ -4305,8 +4455,8 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
                 ),
                 subtitle: Text(
                   _wifiConfigured
-                      ? 'WiFi configurado: ${_configuredWifiName ?? 'red guardada'}'
-                      : 'Enviar red WiFi del cliente al dispositivo.',
+                      ? 'WiFi seleccionado: ${_configuredWifiName ?? 'red guardada'}'
+                      : 'Seleccionar red WiFi del cliente.',
                   style: const TextStyle(color: Color(0xFF9DB0C1)),
                 ),
                 trailing: Icon(
@@ -4316,61 +4466,281 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
                   color: _wifiConfigured ? Color(0xFF20D76D) : Colors.white,
                 ),
                 onTap: () async {
-                  final wifiName = await showModalBottomSheet<String>(
+                  if (_selectedDevice == null) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'Primero conecta un dispositivo SmartCold.',
+                        ),
+                      ),
+                    );
+                    return;
+                  }
+
+                  if (_wifiConfigured) {
+                    final confirmar = await showDialog<bool>(
+                      context: context,
+                      builder: (context) {
+                        return AlertDialog(
+                          title: const Text('Reconfigurar WiFi'),
+                          content: Text(
+                            'El dispositivo ya tiene WiFi configurado'
+                            '${_configuredWifiName == null ? '' : ' ($_configuredWifiName)'}. '
+                            'Si continúas, se intentará reemplazar la configuración actual.',
+                          ),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(context, false),
+                              child: const Text('Cancelar'),
+                            ),
+                            ElevatedButton(
+                              onPressed: () => Navigator.pop(context, true),
+                              child: const Text('Reconfigurar'),
+                            ),
+                          ],
+                        );
+                      },
+                    );
+
+                    if (confirmar != true) return;
+                  }
+                  if (_wifiConfigured) {
+                    _showBlockingMessage(
+                      'Conectando nuevamente con el SmartCold...',
+                    );
+
+                    final deviceId = _selectedDevice?['device_id'] ?? '';
+
+                    final connectedToEsp = await _connectToEspAccessPoint(
+                      deviceId,
+                    );
+
+                    if (!context.mounted) return;
+                    _closeBlockingMessage();
+
+                    if (!connectedToEsp) {
+                      await _showWifiResultDialog(
+                        success: false,
+                        title: 'No se pudo conectar al SmartCold',
+                        message:
+                            'Para reconfigurar el WiFi, el teléfono debe conectarse nuevamente al SmartCold. Intenta otra vez.',
+                      );
+                      return;
+                    }
+                  }
+                  _showBlockingMessage('Escaneando redes WiFi cercanas...');
+
+                  late final List<Map<String, dynamic>> networks;
+
+                  try {
+                    networks = await _scanWifiNetworksFromEsp();
+                  } catch (error) {
+                    if (!context.mounted) return;
+                    _closeBlockingMessage();
+
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          'No se pudieron escanear las redes WiFi: $error',
+                        ),
+                      ),
+                    );
+                    return;
+                  }
+
+                  if (!context.mounted) return;
+                  _closeBlockingMessage();
+
+                  if (networks.isEmpty) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('No se encontraron redes WiFi cercanas.'),
+                      ),
+                    );
+                    return;
+                  }
+
+                  final wifiData =
+                      await showModalBottomSheet<Map<String, String>>(
+                        context: context,
+                        isScrollControlled: true,
+                        backgroundColor: const Color(0xFF020B14),
+                        builder: (context) {
+                          return _WifiConfigSheet(networks: networks);
+                        },
+                      );
+
+                  if (wifiData == null) return;
+                  if (!context.mounted) return;
+                  final selectedSsid = wifiData['ssid'] ?? '';
+                  final currentSsid = _configuredWifiName ?? '';
+
+                  if (_wifiConfigured && selectedSsid == currentSsid) {
+                    await _releaseEspAccessPointConnection();
+
+                    if (!context.mounted) return;
+
+                    await _showWifiResultDialog(
+                      success: true,
+                      title: 'WiFi sin cambios',
+                      message:
+                          'El SmartCold ya está configurado con esa red. No se realizó ningún cambio.',
+                    );
+
+                    return;
+                  }
+                  String progressText =
+                      'Enviando configuración WiFi al SmartCold...';
+                  void Function(void Function())? refreshProgress;
+
+                  void updateProgress(String text) {
+                    progressText = text;
+                    refreshProgress?.call(() {});
+                  }
+
+                  showDialog(
                     context: context,
-                    isScrollControlled: true,
-                    backgroundColor: const Color(0xFF020B14),
-                    builder: (context) {
-                      return const _WifiConfigSheet();
+                    barrierDismissible: false,
+                    builder: (dialogContext) {
+                      return StatefulBuilder(
+                        builder: (context, setDialogState) {
+                          refreshProgress = setDialogState;
+
+                          return AlertDialog(
+                            backgroundColor: const Color(0xFF061A2E),
+                            content: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const CircularProgressIndicator(),
+                                const SizedBox(height: 16),
+                                Text(
+                                  progressText,
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w900,
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                const Text(
+                                  'No cierres la app. Este proceso puede tardar unos segundos.',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    color: Color(0xFF9DB0C1),
+                                    fontSize: 13,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      );
                     },
                   );
+                  final hadWifiConfigured = _wifiConfigured;
+                  final previousWifiName = _configuredWifiName;
+                  final previousConnectionVerified = _connectionVerified;
+                  try {
+                    updateProgress('Enviando credenciales al dispositivo...');
 
-                  if (wifiName == null || wifiName.isEmpty) return;
+                    final result = await _sendWifiToEsp(
+                      ssid: wifiData['ssid'] ?? '',
+                      password: wifiData['password'] ?? '',
+                    );
 
-                  setState(() {
-                    _configuredWifiName = wifiName;
-                    _wifiConfigured = true;
-                  });
+                    final received = result['success'] == true;
+
+                    if (!received) {
+                      if (!context.mounted) return;
+                      Navigator.of(context, rootNavigator: true).pop();
+
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            'No se pudo enviar el WiFi al ESP: ${result['error'] ?? 'error desconocido'}',
+                          ),
+                        ),
+                      );
+                      return;
+                    }
+
+                    updateProgress(
+                      'Credenciales enviadas. Esperando respuesta del ESP...',
+                    );
+
+                    final verification = await _waitForWifiVerification(
+                      onStatus: updateProgress,
+                    );
+
+                    if (!context.mounted) return;
+                    Navigator.of(context, rootNavigator: true).pop();
+
+                    final verified = verification['backend_verified'] == true;
+                    final status = verification['status']?.toString() ?? '';
+                    final error = verification['error']?.toString() ?? '';
+
+                    if (!verified || status == 'error') {
+                      setState(() {
+                        _wifiConfigured = hadWifiConfigured;
+                        _configuredWifiName = previousWifiName;
+                        _connectionVerified = previousConnectionVerified;
+                      });
+
+                      await _releaseEspAccessPointConnection();
+
+                      if (!context.mounted) return;
+
+                      await _showWifiResultDialog(
+                        success: false,
+                        title: 'No se pudo conectar al WiFi',
+                        message: error == 'WIFI_CONNECTION_FAILED'
+                            ? 'El SmartCold no logró conectarse a la red seleccionada. Revisa la contraseña e intenta nuevamente.'
+                            : 'No se pudo verificar la conexión del SmartCold. Intenta nuevamente.',
+                      );
+                      return;
+                    }
+
+                    setState(() {
+                      _configuredWifiName = wifiData['ssid'];
+                      _wifiConfigured = true;
+                      _connectionVerified = true;
+                    });
+                    await _releaseEspAccessPointConnection();
+
+                    if (!context.mounted) return;
+                    await _showWifiResultDialog(
+                      success: true,
+                      title: 'Conexión verificada',
+                      message:
+                          'El SmartCold se conectó correctamente al WiFi. Puedes continuar con la detección de sondas.',
+                    );
+                  } catch (error) {
+                    if (!context.mounted) return;
+
+                    if (Navigator.of(context, rootNavigator: true).canPop()) {
+                      Navigator.of(context, rootNavigator: true).pop();
+                    }
+
+                    setState(() {
+                      _wifiConfigured = hadWifiConfigured;
+                      _configuredWifiName = previousWifiName;
+                      _connectionVerified = previousConnectionVerified;
+                    });
+                    await _releaseEspAccessPointConnection();
+
+                    if (!context.mounted) return;
+                    await _showWifiResultDialog(
+                      success: false,
+                      title: 'Error configurando WiFi',
+                      message:
+                          'No se pudo completar la configuración WiFi. Revisa la conexión con el SmartCold e intenta nuevamente.',
+                    );
+                  }
                 },
               ),
             ),
             if (_wifiConfigured) ...[
               const SizedBox(height: 14),
-              Card(
-                color: const Color(0xFF061A2E),
-                child: ListTile(
-                  leading: const Icon(
-                    Icons.cloud_done_rounded,
-                    color: Color(0xFF00A8FF),
-                  ),
-                  title: const Text(
-                    '3. Verificar conexión',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                  subtitle: Text(
-                    _connectionVerified
-                        ? 'ESP conectado correctamente al backend.'
-                        : 'Esperar confirmación de conexión del dispositivo.',
-                    style: const TextStyle(color: Color(0xFF9DB0C1)),
-                  ),
-                  trailing: Icon(
-                    _connectionVerified
-                        ? Icons.check_circle_rounded
-                        : Icons.chevron_right_rounded,
-                    color: _connectionVerified
-                        ? const Color(0xFF20D76D)
-                        : Colors.white,
-                  ),
-                  onTap: () {
-                    setState(() {
-                      _connectionVerified = true;
-                    });
-                  },
-                ),
-              ),
               if (_connectionVerified) ...[
                 const SizedBox(height: 14),
                 Card(
@@ -4381,7 +4751,7 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
                       color: Color(0xFF00A8FF),
                     ),
                     title: const Text(
-                      '4. Detectar sondas',
+                      '3. Detectar sondas',
                       style: TextStyle(
                         color: Colors.white,
                         fontWeight: FontWeight.w900,
@@ -4418,7 +4788,7 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
                         color: Color(0xFF00A8FF),
                       ),
                       title: const Text(
-                        '5. Asignar roles de sondas',
+                        '4. Asignar roles de sondas',
                         style: TextStyle(
                           color: Colors.white,
                           fontWeight: FontWeight.w900,
@@ -4468,6 +4838,280 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
         ],
       ),
     );
+  }
+
+  Future<void> _showWifiResultDialog({
+    required bool success,
+    required String title,
+    required String message,
+  }) async {
+    if (!context.mounted) return;
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF061A2E),
+          title: Text(
+            title,
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          content: Text(
+            message,
+            style: const TextStyle(
+              color: Color(0xFF9DB0C1),
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          actions: [
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(success ? 'Continuar' : 'Entendido'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showBlockingMessage(String message) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF061A2E),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const CircularProgressIndicator(),
+              const SizedBox(height: 16),
+              Text(
+                message,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  void _closeBlockingMessage() {
+    if (Navigator.of(context, rootNavigator: true).canPop()) {
+      Navigator.of(context, rootNavigator: true).pop();
+    }
+  }
+
+  Future<Map<String, dynamic>> _getWifiStatusFromEsp() async {
+    final response = await http
+        .get(Uri.parse('http://192.168.4.1/api/wifi/status'))
+        .timeout(const Duration(seconds: 5));
+
+    if (response.statusCode != 200) {
+      throw Exception('ESP respondió con código ${response.statusCode}');
+    }
+
+    return jsonDecode(response.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> _waitForWifiVerification({
+    required void Function(String message) onStatus,
+  }) async {
+    Map<String, dynamic> lastStatus = {'status': 'waiting', 'error': ''};
+
+    for (int i = 0; i < 35; i++) {
+      try {
+        final status = await _getWifiStatusFromEsp();
+
+        lastStatus = status;
+
+        final wifiStatus = status['status']?.toString() ?? '';
+        final backendVerified = status['backend_verified'] == true;
+        final error = status['error']?.toString() ?? '';
+
+        if (wifiStatus == 'received') {
+          onStatus('Credenciales recibidas por el SmartCold...');
+        } else if (wifiStatus == 'connecting') {
+          onStatus('Conectando el ESP al WiFi del cliente...');
+        } else if (wifiStatus == 'connected') {
+          onStatus('ESP conectado al WiFi. Verificando backend...');
+        } else if (wifiStatus == 'backend_verified' && backendVerified) {
+          onStatus('WiFi y backend verificados correctamente.');
+          return status;
+        } else if (wifiStatus == 'error' || error == 'WIFI_CONNECTION_FAILED') {
+          onStatus('No se pudo conectar al WiFi. Revisa la contraseña.');
+          return status;
+        } else {
+          onStatus('Verificando estado del ESP...');
+        }
+      } catch (_) {
+        final lastError = lastStatus['error']?.toString() ?? '';
+        final lastWifiStatus = lastStatus['status']?.toString() ?? '';
+
+        if (lastWifiStatus == 'error' ||
+            lastError == 'WIFI_CONNECTION_FAILED') {
+          onStatus('No se pudo conectar al WiFi. Revisa la contraseña.');
+          return lastStatus;
+        }
+
+        onStatus('Esperando respuesta del ESP...');
+      }
+
+      await Future.delayed(const Duration(seconds: 1));
+    }
+
+    onStatus('No se pudo verificar la conexión.');
+    return {
+      'status': 'error',
+      'error': 'NO_SE_PUDO_VERIFICAR_WIFI',
+      'last_status': lastStatus,
+    };
+  }
+
+  Future<List<Map<String, dynamic>>> _scanWifiNetworksFromEsp() async {
+    final response = await http
+        .get(Uri.parse('http://192.168.4.1/api/wifi/scan'))
+        .timeout(const Duration(seconds: 15));
+
+    if (response.statusCode != 200) {
+      throw Exception('ESP respondió con código ${response.statusCode}');
+    }
+
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final networksRaw = data['networks'];
+
+    if (networksRaw is! List) {
+      return [];
+    }
+
+    return networksRaw
+        .whereType<Map>()
+        .map(
+          (item) => item.map((key, value) => MapEntry(key.toString(), value)),
+        )
+        .toList();
+  }
+
+  Future<Map<String, dynamic>> _sendWifiToEsp({
+    required String ssid,
+    required String password,
+  }) async {
+    final response = await http
+        .post(
+          Uri.parse('http://192.168.4.1/api/wifi/configure'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({'ssid': ssid, 'password': password}),
+        )
+        .timeout(const Duration(seconds: 30));
+
+    if (response.statusCode != 200) {
+      throw Exception('ESP respondió con código ${response.statusCode}');
+    }
+
+    return jsonDecode(response.body) as Map<String, dynamic>;
+  }
+
+  Future<bool> _connectToEspAccessPoint(String ssid) async {
+    final connected = await WiFiForIoTPlugin.connect(
+      ssid,
+      security: NetworkSecurity.NONE,
+      joinOnce: true,
+      withInternet: false,
+    );
+
+    if (!connected) return false;
+
+    await WiFiForIoTPlugin.forceWifiUsage(true);
+
+    await Future.delayed(const Duration(seconds: 2));
+
+    return true;
+  }
+
+  Future<Map<String, String>> _fetchEspDeviceInfo(
+    Map<String, String> scannedDevice,
+  ) async {
+    final response = await http
+        .get(Uri.parse('http://192.168.4.1/api/device-info'))
+        .timeout(const Duration(seconds: 5));
+
+    if (response.statusCode != 200) {
+      throw Exception('ESP respondió con código ${response.statusCode}');
+    }
+
+    final data = jsonDecode(response.body) as Map<String, dynamic>;
+
+    return {
+      'device_id':
+          data['device_id']?.toString() ?? scannedDevice['device_id'] ?? '',
+      'hardware_uid':
+          data['hardware_uid']?.toString() ??
+          scannedDevice['hardware_uid'] ??
+          '',
+      'firmware_version': data['firmware_version']?.toString() ?? 'desconocido',
+      'configured': data['configured']?.toString() ?? 'false',
+      'provisioning_status':
+          data['provisioning_status']?.toString() ?? 'pending_installation',
+      'rssi': scannedDevice['rssi'] ?? '',
+      'installation_phase':
+          data['installation_phase']?.toString() ?? 'wifi_setup',
+      'wifi_configured': data['wifi_configured']?.toString() ?? 'false',
+      'connection_verified': data['connection_verified']?.toString() ?? 'false',
+      'configured_wifi_ssid': data['configured_wifi_ssid']?.toString() ?? '',
+      'sensors_detected': data['sensors_detected']?.toString() ?? 'false',
+      'sensors_assigned': data['sensors_assigned']?.toString() ?? 'false',
+    };
+  }
+
+  Future<List<Map<String, String>>> _scanSmartColdDevices() async {
+    final canStartScan = await WiFiScan.instance.canStartScan();
+
+    if (canStartScan != CanStartScan.yes) {
+      throw Exception('No se puede iniciar el escaneo WiFi: $canStartScan');
+    }
+
+    await WiFiScan.instance.startScan();
+
+    final canGetResults = await WiFiScan.instance.canGetScannedResults();
+
+    if (canGetResults != CanGetScannedResults.yes) {
+      throw Exception('No se pueden obtener redes WiFi: $canGetResults');
+    }
+
+    final networks = await WiFiScan.instance.getScannedResults();
+
+    return networks
+        .where((network) => network.ssid.startsWith('SmartCold-'))
+        .map((network) {
+          final ssid = network.ssid;
+
+          return {
+            'device_id': ssid,
+            'hardware_uid': ssid.replaceFirst('SmartCold-', ''),
+            'firmware_version': 'pendiente',
+            'rssi': network.level.toString(),
+          };
+        })
+        .toList();
+  }
+
+  Future<void> _releaseEspAccessPointConnection() async {
+    try {
+      await WiFiForIoTPlugin.forceWifiUsage(false);
+      await WiFiForIoTPlugin.disconnect();
+      await Future.delayed(const Duration(seconds: 2));
+    } catch (_) {
+      // No bloqueamos la instalación si Android no permite soltar la red.
+    }
   }
 }
 
@@ -4556,7 +5200,9 @@ class _ActiveInstallationsList extends StatelessWidget {
 }
 
 class _WifiConfigSheet extends StatefulWidget {
-  const _WifiConfigSheet();
+  const _WifiConfigSheet({required this.networks});
+
+  final List<Map<String, dynamic>> networks;
 
   @override
   State<_WifiConfigSheet> createState() => _WifiConfigSheetState();
@@ -4567,13 +5213,7 @@ class _WifiConfigSheetState extends State<_WifiConfigSheet> {
 
   String? _selectedSsid;
   String? _error;
-
-  final List<String> _mockWifiNetworks = [
-    'QueseriaCentro',
-    'Netlife-Oficina',
-    'CNT-1234',
-    'SmartCold-Test',
-  ];
+  bool _showPassword = false;
 
   @override
   void dispose() {
@@ -4598,7 +5238,7 @@ class _WifiConfigSheetState extends State<_WifiConfigSheet> {
       return;
     }
 
-    Navigator.pop(context, _selectedSsid);
+    Navigator.pop(context, {'ssid': _selectedSsid!, 'password': password});
   }
 
   @override
@@ -4634,7 +5274,9 @@ class _WifiConfigSheetState extends State<_WifiConfigSheet> {
               ),
             ),
             const SizedBox(height: 8),
-            ..._mockWifiNetworks.map((ssid) {
+            ...widget.networks.map((network) {
+              final ssid = network['ssid']?.toString() ?? '';
+              final rssi = network['rssi']?.toString() ?? '—';
               final selected = _selectedSsid == ssid;
 
               return Card(
@@ -4645,11 +5287,15 @@ class _WifiConfigSheetState extends State<_WifiConfigSheet> {
                     color: const Color(0xFF00A8FF),
                   ),
                   title: Text(
-                    ssid,
+                    ssid.isEmpty ? 'Red sin nombre' : ssid,
                     style: const TextStyle(
                       color: Colors.white,
                       fontWeight: FontWeight.w800,
                     ),
+                  ),
+                  subtitle: Text(
+                    'Señal: $rssi dBm',
+                    style: const TextStyle(color: Color(0xFF9DB0C1)),
                   ),
                   onTap: () {
                     setState(() {
@@ -4663,12 +5309,24 @@ class _WifiConfigSheetState extends State<_WifiConfigSheet> {
             const SizedBox(height: 12),
             TextField(
               controller: _passwordController,
-              obscureText: true,
+              obscureText: !_showPassword,
               onSubmitted: (_) => _submit(),
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 labelText: 'Contraseña',
-                prefixIcon: Icon(Icons.lock_rounded),
-                border: OutlineInputBorder(),
+                prefixIcon: const Icon(Icons.lock_rounded),
+                suffixIcon: IconButton(
+                  icon: Icon(
+                    _showPassword
+                        ? Icons.visibility_off_rounded
+                        : Icons.visibility_rounded,
+                  ),
+                  onPressed: () {
+                    setState(() {
+                      _showPassword = !_showPassword;
+                    });
+                  },
+                ),
+                border: const OutlineInputBorder(),
               ),
             ),
             if (_error != null) ...[

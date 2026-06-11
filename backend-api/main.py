@@ -260,34 +260,46 @@ def receive_telemetry(data: TelemetryData):
     device_doc = device_ref.get()
 
     if not device_doc.exists:
-        unregistered_status = {
-            "device_id": data.device_id,
-            "hardware_uid": data.hardware_uid,
-            "firmware_version": data.firmware_version,
-            "online": True,
-            "configured": False,
-            "provisioning_status": "device_not_registered",
-            "device_state": "SETUP",
-            "device_health": "SETUP",
-            "device_health_reason": "DEVICE_NOT_REGISTERED",
-            "compressor_block_reason": "DEVICE_NOT_REGISTERED",
-            "detected_sensors": data.detected_sensors,
-            "sensor_readings": data.sensor_readings,
-            "rssi": data.rssi,
-            "last_seen_at": now_iso,
-            "updated_at": now_iso,
-        }
+        print("🆕 DISPOSITIVO NUEVO DETECTADO - CREANDO REGISTRO INICIAL")
 
-        db.collection("device_status").document(data.device_id).set(
-            unregistered_status,
+        device_ref.set(
+            {
+                "device_id": data.device_id,
+                "hardware_uid": data.hardware_uid,
+                "firmware_version": data.firmware_version,
+                "status": "installation_in_progress",
+                "active": True,
+                "current_installation_id": data.device_id,
+                "created_at": now_iso,
+                "updated_at": now_iso,
+                "last_seen_at": now_iso,
+            },
             merge=True,
         )
 
-        return {
-            "success": False,
-            "message": "DEVICE_NOT_REGISTERED",
-            "config_pending": False,
-        }
+        db.collection("installations").document(data.device_id).set(
+            {
+                "installation_id": data.device_id,
+                "device_id": data.device_id,
+                "hardware_uid": data.hardware_uid,
+                "firmware_version": data.firmware_version,
+                "status": "in_progress",
+                "phase": "pending_sensor_detection",
+                "wifi_configured": True,
+                "connection_verified": True,
+                "configured_wifi_ssid": None,
+                "sensors_detected": bool(data.detected_sensors),
+                "detected_sensors": data.detected_sensors,
+                "sensors_assigned": False,
+                "parameters_configured": False,
+                "tests_completed": False,
+                "created_at": now_iso,
+                "updated_at": now_iso,
+            },
+            merge=True,
+        )
+
+        device_doc = device_ref.get()
 
     device_data = device_doc.to_dict() or {}
     saved_hardware_uid = device_data.get("hardware_uid")
@@ -623,7 +635,6 @@ def update_device_config(device_id: str, config: DeviceConfigUpdate):
 def get_device_config(device_id: str):
 
     device_doc = db.collection("devices").document(device_id).get()
-
     if not device_doc.exists:
         return {
             "success": False,
