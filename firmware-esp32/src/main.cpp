@@ -46,6 +46,13 @@ const String API_BASE_URL = "https://smartcold-api-649501100610.us-central1.run.
 
 const int PIN_ONEWIRE = 4;
 
+// Hardware SmartCold V1
+const int PIN_RELAY_COMPRESSOR = 26;
+const int PIN_RELAY_DEFROST = 27;
+const int PIN_RELAY_FAN = 14;
+const int PIN_DOOR_INPUT = 25;
+const int PIN_EXTERNAL_INPUT = 33;
+
 OneWire oneWire(PIN_ONEWIRE);
 DallasTemperature sensoresDS18B20(&oneWire);
 
@@ -57,14 +64,24 @@ const int MAX_SENSORES_CONFIGURADOS = 8;
 
 struct SensorConfigurado
 {
+  String id;
   String role;
+  String name;
+  String type;
+
   String address;
-  float temperature;
-  bool hasReading;
+
+  bool enabled;
+  float offset;
 
   bool alarmEnabled;
   float tempMinAlarm;
   float tempMaxAlarm;
+  bool canStopCompressor;
+
+  float temperature;
+  bool hasReading;
+
   bool inAlarm;
   bool previousAlarmState;
   String alarmReason;
@@ -77,7 +94,7 @@ const bool MODO_PRUEBA_TEMPERATURA = false;
 unsigned long ultimoCambioTemperaturaPrueba = 0;
 
 bool compressorRelayOn = false;
-int compressorOutputPin = 26;
+int compressorOutputPin = PIN_RELAY_COMPRESSOR;
 float configSetpoint = 4.0;
 float configDifferential = 2.0;
 int configMinOffSeconds = 180;
@@ -93,6 +110,15 @@ unsigned long lastDefrostMillis = 0;
 bool dripActive = false;
 unsigned long dripStartMillis = 0;
 int configDripTimeSeconds = 120;
+
+bool configFanEnabled = true;
+bool configDoorInputEnabled = false;
+bool configDoorNormallyClosed = true;
+bool configExternalInputEnabled = false;
+bool configExternalInputNormallyClosed = true;
+bool configExternalInputCanStopCompressor = false;
+String configExternalInputRole = "external_alarm";
+String configExternalInputName = "Entrada externa";
 
 unsigned long compressorRuntimeSinceDefrostSeconds = 0;
 unsigned long lastCompressorRuntimeUpdateMillis = 0;
@@ -151,6 +177,7 @@ void cargarEstadoInstalacionLocal()
   installationSensorsAssigned = preferences.getBool("inst_sens_asg", false);
 }
 void descargarConfiguracion();
+String nombreSensorPorRole(String role);
 
 String obtenerEstadoOperativo()
 {
@@ -493,9 +520,6 @@ void borrarConfiguracionOperativaGuardada()
   preferences.remove("drip_sec");
 
   configUpdatedAt = "";
-  cantidadSensoresConfigurados = 0;
-  sensorCamaraAddress = "";
-  sensorEvaporadorAddress = "";
 
   Serial.println("🧹 Configuracion operativa local eliminada.");
 }
@@ -537,7 +561,9 @@ void confirmarConfiguracionDescargada()
 
   http.end();
 }
-
+void limpiarSensorConfigurado(SensorConfigurado &sensor);
+String idSensorPorRole(String role);
+void guardarSensoresConfiguradosEnMemoria();
 void descargarConfiguracion()
 {
   if (WiFi.status() != WL_CONNECTED)
@@ -666,17 +692,23 @@ void descargarConfiguracion()
 
       if (enabled && role.length() > 0 && address.length() > 0 && cantidadSensoresConfigurados < MAX_SENSORES_CONFIGURADOS)
       {
+        limpiarSensorConfigurado(sensoresConfigurados[cantidadSensoresConfigurados]);
+
+        sensoresConfigurados[cantidadSensoresConfigurados].id =
+            String(sensor["id"] | idSensorPorRole(role));
         sensoresConfigurados[cantidadSensoresConfigurados].role = role;
+        sensoresConfigurados[cantidadSensoresConfigurados].name =
+            String(sensor["name"] | nombreSensorPorRole(role));
+        sensoresConfigurados[cantidadSensoresConfigurados].type =
+            String(sensor["type"] | "ds18b20");
         sensoresConfigurados[cantidadSensoresConfigurados].address = address;
-        sensoresConfigurados[cantidadSensoresConfigurados].temperature = NAN;
-        sensoresConfigurados[cantidadSensoresConfigurados].hasReading = false;
+        sensoresConfigurados[cantidadSensoresConfigurados].enabled = enabled;
+        sensoresConfigurados[cantidadSensoresConfigurados].offset = sensor["offset"] | 0.0;
 
         sensoresConfigurados[cantidadSensoresConfigurados].alarmEnabled = sensor["alarm_enabled"] | false;
         sensoresConfigurados[cantidadSensoresConfigurados].tempMinAlarm = sensor["temp_min_alarm"] | -100.0;
         sensoresConfigurados[cantidadSensoresConfigurados].tempMaxAlarm = sensor["temp_max_alarm"] | 100.0;
-        sensoresConfigurados[cantidadSensoresConfigurados].inAlarm = false;
-        sensoresConfigurados[cantidadSensoresConfigurados].previousAlarmState = false;
-        sensoresConfigurados[cantidadSensoresConfigurados].alarmReason = "";
+        sensoresConfigurados[cantidadSensoresConfigurados].canStopCompressor = sensor["can_stop_compressor"] | false;
 
         cantidadSensoresConfigurados++;
       }
@@ -692,18 +724,7 @@ void descargarConfiguracion()
       }
     }
 
-    preferences.putInt("sensor_count", cantidadSensoresConfigurados);
-
-    for (int i = 0; i < cantidadSensoresConfigurados; i++)
-    {
-      String prefix = "s" + String(i) + "_";
-
-      preferences.putString((prefix + "role").c_str(), sensoresConfigurados[i].role);
-      preferences.putString((prefix + "addr").c_str(), sensoresConfigurados[i].address);
-      preferences.putBool((prefix + "alm_en").c_str(), sensoresConfigurados[i].alarmEnabled);
-      preferences.putFloat((prefix + "min").c_str(), sensoresConfigurados[i].tempMinAlarm);
-      preferences.putFloat((prefix + "max").c_str(), sensoresConfigurados[i].tempMaxAlarm);
-    }
+    guardarSensoresConfiguradosEnMemoria();
 
     Serial.print("Sensores configurados cargados: ");
     Serial.println(cantidadSensoresConfigurados);
@@ -1428,6 +1449,111 @@ void leerTemperaturasDS18B20()
   }
 }
 
+void limpiarSensorConfigurado(SensorConfigurado &sensor)
+{
+  sensor.id = "";
+  sensor.role = "";
+  sensor.name = "";
+  sensor.type = "ds18b20";
+  sensor.address = "";
+  sensor.enabled = true;
+  sensor.offset = 0.0;
+  sensor.alarmEnabled = false;
+  sensor.tempMinAlarm = -100.0;
+  sensor.tempMaxAlarm = 100.0;
+  sensor.canStopCompressor = false;
+  sensor.temperature = NAN;
+  sensor.hasReading = false;
+  sensor.inAlarm = false;
+  sensor.previousAlarmState = false;
+  sensor.alarmReason = "";
+}
+
+bool roleSensorValido(String role)
+{
+  role.toLowerCase();
+
+  return role == "chamber" ||
+         role == "evaporator" ||
+         role == "condenser" ||
+         role == "compressor" ||
+         role == "ambient" ||
+         role == "aux1" ||
+         role == "aux2" ||
+         role == "aux3";
+}
+
+bool roleSensorDebeSerUnico(String role)
+{
+  role.toLowerCase();
+
+  return role == "chamber" ||
+         role == "evaporator" ||
+         role == "condenser" ||
+         role == "compressor" ||
+         role == "ambient";
+}
+
+bool existeRoleConfigurado(String role)
+{
+  role.toLowerCase();
+
+  for (int i = 0; i < cantidadSensoresConfigurados; i++)
+  {
+    String roleActual = sensoresConfigurados[i].role;
+    roleActual.toLowerCase();
+
+    if (roleActual == role)
+    {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool sensorEstaDetectado(String address)
+{
+  address.toUpperCase();
+
+  for (int i = 0; i < cantidadSensoresDetectados; i++)
+  {
+    String detectado = sensoresDetectados[i];
+    detectado.toUpperCase();
+
+    if (detectado == address)
+    {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+void guardarSensoresConfiguradosEnMemoria()
+{
+  preferences.putInt("sensor_count", cantidadSensoresConfigurados);
+
+  for (int i = 0; i < cantidadSensoresConfigurados; i++)
+  {
+    String prefix = "s" + String(i) + "_";
+
+    preferences.putString((prefix + "id").c_str(), sensoresConfigurados[i].id);
+    preferences.putString((prefix + "role").c_str(), sensoresConfigurados[i].role);
+    preferences.putString((prefix + "name").c_str(), sensoresConfigurados[i].name);
+    preferences.putString((prefix + "type").c_str(), sensoresConfigurados[i].type);
+    preferences.putString((prefix + "addr").c_str(), sensoresConfigurados[i].address);
+
+    preferences.putBool((prefix + "en").c_str(), sensoresConfigurados[i].enabled);
+    preferences.putFloat((prefix + "offset").c_str(), sensoresConfigurados[i].offset);
+
+    preferences.putBool((prefix + "alm_en").c_str(), sensoresConfigurados[i].alarmEnabled);
+    preferences.putFloat((prefix + "min").c_str(), sensoresConfigurados[i].tempMinAlarm);
+    preferences.putFloat((prefix + "max").c_str(), sensoresConfigurados[i].tempMaxAlarm);
+    preferences.putBool((prefix + "stop").c_str(), sensoresConfigurados[i].canStopCompressor);
+  }
+}
+
 void cargarSensoresConfiguradosDesdeMemoria()
 {
   cantidadSensoresConfigurados = 0;
@@ -1440,26 +1566,46 @@ void cargarSensoresConfiguradosDesdeMemoria()
 
     String role = preferences.getString((prefix + "role").c_str(), "");
     String address = preferences.getString((prefix + "addr").c_str(), "");
+    String type = preferences.getString((prefix + "type").c_str(), "ds18b20");
+    String name = preferences.getString((prefix + "name").c_str(), "");
 
     role.toLowerCase();
     address.toUpperCase();
+    type.toLowerCase();
 
     if (role.length() == 0 || address.length() == 0)
     {
       continue;
     }
 
-    sensoresConfigurados[cantidadSensoresConfigurados].role = role;
-    sensoresConfigurados[cantidadSensoresConfigurados].address = address;
-    sensoresConfigurados[cantidadSensoresConfigurados].temperature = NAN;
-    sensoresConfigurados[cantidadSensoresConfigurados].hasReading = false;
+    limpiarSensorConfigurado(sensoresConfigurados[cantidadSensoresConfigurados]);
 
-    sensoresConfigurados[cantidadSensoresConfigurados].alarmEnabled = preferences.getBool((prefix + "alm_en").c_str(), false);
-    sensoresConfigurados[cantidadSensoresConfigurados].tempMinAlarm = preferences.getFloat((prefix + "min").c_str(), -100.0);
-    sensoresConfigurados[cantidadSensoresConfigurados].tempMaxAlarm = preferences.getFloat((prefix + "max").c_str(), 100.0);
-    sensoresConfigurados[cantidadSensoresConfigurados].inAlarm = false;
-    sensoresConfigurados[cantidadSensoresConfigurados].previousAlarmState = false;
-    sensoresConfigurados[cantidadSensoresConfigurados].alarmReason = "";
+    sensoresConfigurados[cantidadSensoresConfigurados].id =
+        preferences.getString((prefix + "id").c_str(), idSensorPorRole(role));
+
+    sensoresConfigurados[cantidadSensoresConfigurados].role = role;
+    sensoresConfigurados[cantidadSensoresConfigurados].name =
+        name.length() > 0 ? name : nombreSensorPorRole(role);
+    sensoresConfigurados[cantidadSensoresConfigurados].type = type;
+    sensoresConfigurados[cantidadSensoresConfigurados].address = address;
+
+    sensoresConfigurados[cantidadSensoresConfigurados].enabled =
+        preferences.getBool((prefix + "en").c_str(), true);
+
+    sensoresConfigurados[cantidadSensoresConfigurados].offset =
+        preferences.getFloat((prefix + "offset").c_str(), 0.0);
+
+    sensoresConfigurados[cantidadSensoresConfigurados].alarmEnabled =
+        preferences.getBool((prefix + "alm_en").c_str(), false);
+
+    sensoresConfigurados[cantidadSensoresConfigurados].tempMinAlarm =
+        preferences.getFloat((prefix + "min").c_str(), -100.0);
+
+    sensoresConfigurados[cantidadSensoresConfigurados].tempMaxAlarm =
+        preferences.getFloat((prefix + "max").c_str(), 100.0);
+
+    sensoresConfigurados[cantidadSensoresConfigurados].canStopCompressor =
+        preferences.getBool((prefix + "stop").c_str(), false);
 
     cantidadSensoresConfigurados++;
   }
@@ -1467,6 +1613,371 @@ void cargarSensoresConfiguradosDesdeMemoria()
   Serial.print("Sensores configurados cargados desde memoria: ");
   Serial.println(cantidadSensoresConfigurados);
 }
+
+String nombreSensorPorRole(String role)
+{
+  role.toLowerCase();
+
+  if (role == "chamber")
+    return "Cámara";
+
+  if (role == "evaporator")
+    return "Evaporador";
+
+  if (role == "condenser")
+    return "Condensador";
+
+  if (role == "compressor")
+    return "Compresor";
+
+  if (role == "ambient")
+    return "Ambiente";
+
+  if (role == "aux1")
+    return "Auxiliar 1";
+
+  if (role == "aux2")
+    return "Auxiliar 2";
+
+  if (role == "aux3")
+    return "Auxiliar 3";
+
+  return role;
+}
+String idSensorPorRole(String role)
+{
+  if (role == "chamber")
+    return "chamber_1";
+  if (role == "evaporator")
+    return "evaporator_1";
+  if (role == "condenser")
+    return "condenser_1";
+  if (role == "compressor")
+    return "compressor_1";
+  if (role == "ambient")
+    return "ambient_1";
+  if (role == "aux1")
+    return "aux1";
+  if (role == "aux2")
+    return "aux2";
+  if (role == "aux3")
+    return "aux3";
+
+  return "sensor_unknown";
+}
+int buscarSensorConfiguradoPorAddress(String address)
+{
+  address.toUpperCase();
+
+  for (int i = 0; i < cantidadSensoresConfigurados; i++)
+  {
+    String configuredAddress = sensoresConfigurados[i].address;
+    configuredAddress.toUpperCase();
+
+    if (configuredAddress == address)
+    {
+      return i;
+    }
+  }
+
+  return -1;
+}
+
+void responderInstallSensors()
+{
+  sensoresDS18B20.begin();
+  sensoresDS18B20.requestTemperatures();
+
+  int cantidadFisica = sensoresDS18B20.getDeviceCount();
+  int cantidadReportada = 0;
+
+  JsonDocument doc;
+
+  doc["success"] = true;
+  doc["device_id"] = DEVICE_ID;
+  doc["hardware_uid"] = HARDWARE_UID;
+  doc["firmware_version"] = FIRMWARE_VERSION;
+  doc["installation_phase"] = installationPhase;
+  doc["max_ds18b20_sensors"] = MAX_SENSORES_DS18B20;
+  doc["configured_count"] = cantidadSensoresConfigurados;
+
+  JsonArray sensores = doc["sensors"].to<JsonArray>();
+  DeviceAddress direccion;
+
+  cantidadSensoresDetectados = 0;
+
+  for (int i = 0; i < cantidadFisica && cantidadReportada < MAX_SENSORES_DS18B20; i++)
+  {
+    if (!sensoresDS18B20.getAddress(direccion, i))
+    {
+      continue;
+    }
+
+    String address = direccionSensorToString(direccion);
+    float tempC = sensoresDS18B20.getTempC(direccion);
+    bool hasReading = tempC != DEVICE_DISCONNECTED_C;
+
+    sensoresDetectados[cantidadSensoresDetectados] = address;
+    cantidadSensoresDetectados++;
+
+    int configuredIndex = buscarSensorConfiguradoPorAddress(address);
+    bool configured = configuredIndex >= 0;
+
+    JsonObject sensor = sensores.add<JsonObject>();
+    sensor["index"] = cantidadReportada + 1;
+    sensor["type"] = "ds18b20";
+    sensor["address"] = address;
+    sensor["temperature"] = hasReading ? tempC : 0;
+    sensor["has_reading"] = hasReading;
+    sensor["configured"] = configured;
+
+    if (configured)
+    {
+      sensor["id"] = sensoresConfigurados[configuredIndex].id;
+      sensor["role"] = sensoresConfigurados[configuredIndex].role;
+      sensor["name"] = sensoresConfigurados[configuredIndex].name;
+      sensor["enabled"] = sensoresConfigurados[configuredIndex].enabled;
+      sensor["offset"] = sensoresConfigurados[configuredIndex].offset;
+      sensor["alarm_enabled"] = sensoresConfigurados[configuredIndex].alarmEnabled;
+      sensor["temp_min_alarm"] = sensoresConfigurados[configuredIndex].tempMinAlarm;
+      sensor["temp_max_alarm"] = sensoresConfigurados[configuredIndex].tempMaxAlarm;
+      sensor["can_stop_compressor"] = sensoresConfigurados[configuredIndex].canStopCompressor;
+    }
+    else
+    {
+      sensor["id"] = "";
+      sensor["role"] = "";
+      sensor["name"] = "Sin asignar";
+      sensor["enabled"] = false;
+      sensor["offset"] = 0;
+      sensor["alarm_enabled"] = false;
+      sensor["temp_min_alarm"] = 0;
+      sensor["temp_max_alarm"] = 0;
+      sensor["can_stop_compressor"] = false;
+    }
+
+    cantidadReportada++;
+  }
+
+  installationSensorsDetected = cantidadReportada > 0;
+  if (installationSensorsDetected && installationPhase == "wifi_setup")
+  {
+    installationPhase = "sensors_setup";
+  }
+  guardarEstadoInstalacionLocal();
+
+  doc["detected_count"] = cantidadReportada;
+  doc["sensors_detected"] = installationSensorsDetected;
+  doc["sensors_assigned"] = installationSensorsAssigned;
+
+  String respuesta;
+  serializeJson(doc, respuesta);
+
+  servidorInstalacion.send(200, "application/json", respuesta);
+}
+
+void responderGuardarInstallSensors()
+{
+  if (servidorInstalacion.method() != HTTP_POST)
+  {
+    servidorInstalacion.send(405, "application/json", "{\"success\":false,\"error\":\"METHOD_NOT_ALLOWED\"}");
+    return;
+  }
+
+  // Refresca la lista física antes de validar direcciones.
+  sensoresDS18B20.begin();
+  int cantidadFisica = sensoresDS18B20.getDeviceCount();
+  cantidadSensoresDetectados = 0;
+
+  DeviceAddress direccion;
+  for (int i = 0; i < cantidadFisica && cantidadSensoresDetectados < MAX_SENSORES_DS18B20; i++)
+  {
+    if (sensoresDS18B20.getAddress(direccion, i))
+    {
+      sensoresDetectados[cantidadSensoresDetectados] = direccionSensorToString(direccion);
+      cantidadSensoresDetectados++;
+    }
+  }
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, servidorInstalacion.arg("plain"));
+
+  if (error)
+  {
+    servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"INVALID_JSON\"}");
+    return;
+  }
+
+  if (!doc["sensors"].is<JsonArray>())
+  {
+    servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"SENSORS_ARRAY_REQUIRED\"}");
+    return;
+  }
+
+  JsonArray sensors = doc["sensors"].as<JsonArray>();
+
+  if (sensors.size() == 0)
+  {
+    servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"AT_LEAST_ONE_SENSOR_REQUIRED\"}");
+    return;
+  }
+
+  cantidadSensoresConfigurados = 0;
+  sensorCamaraAddress = "";
+  sensorEvaporadorAddress = "";
+
+  for (JsonObject sensor : sensors)
+  {
+    if (cantidadSensoresConfigurados >= MAX_SENSORES_CONFIGURADOS)
+    {
+      servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"MAX_SENSORS_EXCEEDED\"}");
+      return;
+    }
+
+    String type = sensor["type"] | "ds18b20";
+    String role = sensor["role"] | "";
+    String name = sensor["name"] | "";
+    String address = sensor["address"] | "";
+
+    type.toLowerCase();
+    role.toLowerCase();
+    address.toUpperCase();
+    name.trim();
+
+    bool enabled = sensor["enabled"] | true;
+
+    if (!enabled)
+    {
+      continue;
+    }
+
+    if (type != "ds18b20")
+    {
+      servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"ONLY_DS18B20_SUPPORTED_IN_THIS_STEP\"}");
+      return;
+    }
+
+    if (!roleSensorValido(role))
+    {
+      servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"INVALID_SENSOR_ROLE\"}");
+      return;
+    }
+
+    if (address.length() == 0)
+    {
+      servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"ADDRESS_REQUIRED\"}");
+      return;
+    }
+
+    if (!sensorEstaDetectado(address))
+    {
+      servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"SENSOR_NOT_DETECTED\"}");
+      return;
+    }
+
+    if (buscarSensorConfiguradoPorAddress(address) >= 0)
+    {
+      servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"DUPLICATED_SENSOR_ADDRESS\"}");
+      return;
+    }
+
+    if (roleSensorDebeSerUnico(role) && existeRoleConfigurado(role))
+    {
+      servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"DUPLICATED_SENSOR_ROLE\"}");
+      return;
+    }
+
+    limpiarSensorConfigurado(sensoresConfigurados[cantidadSensoresConfigurados]);
+
+    sensoresConfigurados[cantidadSensoresConfigurados].id =
+        String(sensor["id"] | idSensorPorRole(role));
+
+    sensoresConfigurados[cantidadSensoresConfigurados].role = role;
+    sensoresConfigurados[cantidadSensoresConfigurados].name =
+        name.length() > 0 ? name : nombreSensorPorRole(role);
+    sensoresConfigurados[cantidadSensoresConfigurados].type = type;
+    sensoresConfigurados[cantidadSensoresConfigurados].address = address;
+
+    sensoresConfigurados[cantidadSensoresConfigurados].enabled = true;
+    sensoresConfigurados[cantidadSensoresConfigurados].offset = sensor["offset"] | 0.0;
+
+    sensoresConfigurados[cantidadSensoresConfigurados].alarmEnabled =
+        sensor["alarm_enabled"] | false;
+
+    sensoresConfigurados[cantidadSensoresConfigurados].tempMinAlarm =
+        sensor["temp_min_alarm"] | -100.0;
+
+    sensoresConfigurados[cantidadSensoresConfigurados].tempMaxAlarm =
+        sensor["temp_max_alarm"] | 100.0;
+
+    sensoresConfigurados[cantidadSensoresConfigurados].canStopCompressor =
+        sensor["can_stop_compressor"] | false;
+
+    if (role == "chamber")
+    {
+      sensorCamaraAddress = address;
+    }
+
+    if (role == "evaporator")
+    {
+      sensorEvaporadorAddress = address;
+    }
+
+    cantidadSensoresConfigurados++;
+  }
+
+  if (cantidadSensoresConfigurados == 0)
+  {
+    servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"NO_ENABLED_SENSORS\"}");
+    return;
+  }
+
+  if (sensorCamaraAddress.length() == 0)
+  {
+    servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"CHAMBER_SENSOR_REQUIRED\"}");
+    return;
+  }
+
+  guardarSensoresConfiguradosEnMemoria();
+  preferences.putString("cam_addr", sensorCamaraAddress);
+  preferences.putString("evap_addr", sensorEvaporadorAddress);
+
+  installationSensorsDetected = cantidadSensoresDetectados > 0;
+  installationSensorsAssigned = true;
+  installationPhase = "pending_initial_configuration";
+  guardarEstadoInstalacionLocal();
+
+  JsonDocument respuestaDoc;
+  respuestaDoc["success"] = true;
+  respuestaDoc["device_id"] = DEVICE_ID;
+  respuestaDoc["installation_phase"] = installationPhase;
+  respuestaDoc["configured_count"] = cantidadSensoresConfigurados;
+  respuestaDoc["sensors_assigned"] = installationSensorsAssigned;
+
+  JsonArray assigned = respuestaDoc["sensors"].to<JsonArray>();
+
+  for (int i = 0; i < cantidadSensoresConfigurados; i++)
+  {
+    JsonObject item = assigned.add<JsonObject>();
+    item["id"] = sensoresConfigurados[i].id;
+    item["type"] = sensoresConfigurados[i].type;
+    item["role"] = sensoresConfigurados[i].role;
+    item["name"] = sensoresConfigurados[i].name;
+    item["address"] = sensoresConfigurados[i].address;
+    item["enabled"] = sensoresConfigurados[i].enabled;
+    item["offset"] = sensoresConfigurados[i].offset;
+    item["alarm_enabled"] = sensoresConfigurados[i].alarmEnabled;
+    item["temp_min_alarm"] = sensoresConfigurados[i].tempMinAlarm;
+    item["temp_max_alarm"] = sensoresConfigurados[i].tempMaxAlarm;
+    item["can_stop_compressor"] = sensoresConfigurados[i].canStopCompressor;
+  }
+
+  String respuesta;
+  serializeJson(respuestaDoc, respuesta);
+
+  servidorInstalacion.send(200, "application/json", respuesta);
+}
+
 void responderDeviceInfo()
 {
   leerTemperaturasDS18B20();
@@ -1722,6 +2233,8 @@ void iniciarModoInstalacionLocal()
   servidorInstalacion.on("/api/wifi/scan", HTTP_GET, responderWifiScan);
   servidorInstalacion.on("/api/wifi/configure", HTTP_POST, responderWifiConfigure);
   servidorInstalacion.on("/api/wifi/status", HTTP_GET, responderWifiStatus);
+  servidorInstalacion.on("/api/install/sensors", HTTP_GET, responderInstallSensors);
+  servidorInstalacion.on("/api/install/sensors", HTTP_POST, responderGuardarInstallSensors);
   servidorInstalacion.on("/api/factory-reset", HTTP_POST, responderFactoryReset);
 
   servidorInstalacion.begin();
@@ -1771,6 +2284,8 @@ void iniciarModoInstalacionLocalConWifiCliente()
   servidorInstalacion.on("/api/wifi/scan", HTTP_GET, responderWifiScan);
   servidorInstalacion.on("/api/wifi/configure", HTTP_POST, responderWifiConfigure);
   servidorInstalacion.on("/api/wifi/status", HTTP_GET, responderWifiStatus);
+  servidorInstalacion.on("/api/install/sensors", HTTP_GET, responderInstallSensors);
+  servidorInstalacion.on("/api/install/sensors", HTTP_POST, responderGuardarInstallSensors);
   servidorInstalacion.on("/api/factory-reset", HTTP_POST, responderFactoryReset);
 
   servidorInstalacion.begin();
@@ -1802,7 +2317,14 @@ void setup()
   preferences.begin("smartcold", false);
   cargarEstadoInstalacionLocal();
   pinMode(compressorOutputPin, OUTPUT);
+  pinMode(PIN_RELAY_DEFROST, OUTPUT);
+  pinMode(PIN_RELAY_FAN, OUTPUT);
+  pinMode(PIN_DOOR_INPUT, INPUT_PULLUP);
+  pinMode(PIN_EXTERNAL_INPUT, INPUT_PULLUP);
+
   digitalWrite(compressorOutputPin, LOW);
+  digitalWrite(PIN_RELAY_DEFROST, LOW);
+  digitalWrite(PIN_RELAY_FAN, LOW);
 
   compressorRelayOn = false;
   compressorShouldBeOn = false;
