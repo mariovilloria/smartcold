@@ -1,0 +1,3 @@
+# Archivos temporales de análisis
+backend-api/exports/
+backend-api/scripts/export_firestore_structure.py
