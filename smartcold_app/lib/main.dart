@@ -4129,6 +4129,10 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
   bool _connectionVerified = false;
   bool _sensorsDetected = false;
   bool _sensorRolesAssigned = false;
+  String _operationMode = 'refrigerate';
+  String _pendingOperationMode = 'refrigerate';
+  String? _selectedEspStaIp;
+  String? _selectedEspApIp;
   //bool get _canConfigureWifi => _selectedDevice != null;
 
   //bool get _canDetectSensors => _wifiConfigured && _connectionVerified;
@@ -4172,7 +4176,7 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
               fontWeight: FontWeight.w600,
             ),
           ),
-          const SizedBox(height: 18),
+          const SizedBox(height: 14),
           Card(
             color: const Color(0xFF061A2E),
             child: ListTile(
@@ -4406,6 +4410,9 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
 
                   setState(() {
                     _selectedDevice = deviceInfo;
+                    _selectedEspStaIp = deviceInfo['sta_ip'];
+                    _selectedEspApIp = deviceInfo['ap_ip'];
+                    _pendingOperationMode = _operationMode;
 
                     if (espConfigured) {
                       _wifiConfigured = true;
@@ -4481,6 +4488,161 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
           ),
 
           if (_selectedDevice != null) ...[
+            const SizedBox(height: 18),
+            Card(
+              color: const Color(0xFF061A2E),
+              child: Column(
+                children: [
+                  ListTile(
+                    leading: const Icon(
+                      Icons.kitchen_rounded,
+                      color: Color(0xFF00A8FF),
+                    ),
+                    title: const Text(
+                      'Tipo de equipo',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    subtitle: Text(
+                      _pendingOperationMode == 'freeze'
+                          ? 'Congelador'
+                          : 'Refrigerador',
+                      style: const TextStyle(color: Color(0xFF9DB0C1)),
+                    ),
+                    trailing: const Icon(
+                      Icons.chevron_right_rounded,
+                      color: Colors.white,
+                    ),
+                    onTap: () async {
+                      final selected = await showModalBottomSheet<String>(
+                        context: context,
+                        backgroundColor: const Color(0xFF020B14),
+                        builder: (context) {
+                          return SafeArea(
+                            child: ListView(
+                              padding: const EdgeInsets.all(16),
+                              children: [
+                                const Text(
+                                  'Selecciona el tipo de equipo',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.w900,
+                                  ),
+                                ),
+                                const SizedBox(height: 12),
+                                Card(
+                                  color: const Color(0xFF061A2E),
+                                  child: ListTile(
+                                    leading: const Icon(
+                                      Icons.ac_unit_rounded,
+                                      color: Color(0xFF00A8FF),
+                                    ),
+                                    title: const Text(
+                                      'Refrigerador',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.w900,
+                                      ),
+                                    ),
+                                    subtitle: const Text(
+                                      'Rango típico sobre 0 °C.',
+                                      style: TextStyle(
+                                        color: Color(0xFF9DB0C1),
+                                      ),
+                                    ),
+                                    onTap: () =>
+                                        Navigator.pop(context, 'refrigerate'),
+                                  ),
+                                ),
+                                Card(
+                                  color: const Color(0xFF061A2E),
+                                  child: ListTile(
+                                    leading: const Icon(
+                                      Icons.severe_cold_rounded,
+                                      color: Color(0xFF00A8FF),
+                                    ),
+                                    title: const Text(
+                                      'Congelador',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.w900,
+                                      ),
+                                    ),
+                                    subtitle: const Text(
+                                      'Rango típico bajo 0 °C.',
+                                      style: TextStyle(
+                                        color: Color(0xFF9DB0C1),
+                                      ),
+                                    ),
+                                    onTap: () =>
+                                        Navigator.pop(context, 'freeze'),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      );
+
+                      if (selected == null) return;
+
+                      setState(() {
+                        _pendingOperationMode = selected;
+                      });
+                    },
+                  ),
+                  if (_pendingOperationMode != _operationMode)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          onPressed: () async {
+                            try {
+                              final result = await _saveOperationModeToBackend(
+                                _pendingOperationMode,
+                              );
+
+                              if (!mounted) return;
+
+                              setState(() {
+                                _operationMode = _pendingOperationMode;
+                              });
+
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    _operationMode == 'freeze'
+                                        ? 'Tipo de equipo guardado: Congelador'
+                                        : 'Tipo de equipo guardado: Refrigerador',
+                                  ),
+                                ),
+                              );
+
+                              debugPrint('Operation mode actualizado: $result');
+                            } catch (e) {
+                              if (!mounted) return;
+
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    'Error guardando tipo de equipo: $e',
+                                  ),
+                                ),
+                              );
+                            }
+                          },
+                          icon: const Icon(Icons.save_rounded),
+                          label: const Text('Guardar cambio de tipo'),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
             const SizedBox(height: 14),
             Card(
               color: const Color(0xFF061A2E),
@@ -5086,7 +5248,39 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
                           ? Colors.grey
                           : Colors.white,
                     ),
-                    onTap: !_canConfigureParameters ? null : () async {},
+                    onTap: !_canConfigureParameters
+                        ? null
+                        : () async {
+                            final result =
+                                await showModalBottomSheet<
+                                  Map<String, dynamic>
+                                >(
+                                  context: context,
+                                  isScrollControlled: true,
+                                  backgroundColor: const Color(0xFF020B14),
+                                  builder: (context) {
+                                    return _InitialConfigurationSheet(
+                                      operationMode: _operationMode,
+                                    );
+                                  },
+                                );
+
+                            if (result == null) return;
+
+                            setState(() {
+                              _operationMode =
+                                  result['operation_mode']?.toString() ??
+                                  _operationMode;
+                            });
+
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text(
+                                  'Configuración inicial preparada.',
+                                ),
+                              ),
+                            );
+                          },
                   ),
                 ),
               ],
@@ -5180,6 +5374,32 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
     return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
+  Future<Map<String, dynamic>> _saveOperationModeToBackend(
+    String operationMode,
+  ) async {
+    final deviceId = _selectedDevice?['device_id']?.toString() ?? '';
+
+    if (deviceId.isEmpty) {
+      throw Exception('No hay dispositivo seleccionado.');
+    }
+
+    final response = await http.post(
+      Uri.parse(
+        'https://smartcold-api-649501100610.us-central1.run.app/api/devices/$deviceId/operation-mode',
+      ),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'operation_mode': operationMode}),
+    );
+
+    final body = jsonDecode(response.body) as Map<String, dynamic>;
+
+    if (response.statusCode != 200 || body['success'] != true) {
+      throw Exception(body['message'] ?? 'No se pudo guardar tipo de equipo');
+    }
+
+    return body;
+  }
+
   Future<Map<String, dynamic>> _waitForWifiVerification({
     required void Function(String message) onStatus,
   }) async {
@@ -5202,6 +5422,17 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
         } else if (wifiStatus == 'connected') {
           onStatus('ESP conectado al WiFi. Verificando backend...');
         } else if (wifiStatus == 'backend_verified' && backendVerified) {
+          final staIp = status['sta_ip']?.toString() ?? '';
+          final apIp = status['ap_ip']?.toString() ?? '';
+
+          if (staIp.isNotEmpty) {
+            _selectedEspStaIp = staIp;
+          }
+
+          if (apIp.isNotEmpty) {
+            _selectedEspApIp = apIp;
+          }
+
           onStatus('WiFi y backend verificados correctamente.');
           return status;
         } else if (wifiStatus == 'error' || error == 'WIFI_CONNECTION_FAILED') {
@@ -5278,10 +5509,17 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
   }
 
   Future<Map<String, dynamic>> _fetchInstallSensorsFromEsp() async {
-    final urls = [
-      'http://192.168.18.67/api/install/sensors',
-      'http://192.168.4.1/api/install/sensors',
-    ];
+    final urls = <String>[];
+
+    if (_selectedEspStaIp != null && _selectedEspStaIp!.isNotEmpty) {
+      urls.add('http://$_selectedEspStaIp/api/install/sensors');
+    }
+
+    if (_selectedEspApIp != null && _selectedEspApIp!.isNotEmpty) {
+      urls.add('http://$_selectedEspApIp/api/install/sensors');
+    }
+
+    urls.add('http://192.168.4.1/api/install/sensors');
 
     Object? lastError;
 
@@ -5292,7 +5530,22 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
             .timeout(const Duration(seconds: 4));
 
         if (response.statusCode == 200) {
-          return jsonDecode(response.body) as Map<String, dynamic>;
+          final data = jsonDecode(response.body) as Map<String, dynamic>;
+
+          final expectedDeviceId = _selectedDevice?['device_id']?.toString();
+          final responseDeviceId = data['device_id']?.toString();
+
+          if (expectedDeviceId != null &&
+              expectedDeviceId.isNotEmpty &&
+              responseDeviceId != null &&
+              responseDeviceId.isNotEmpty &&
+              expectedDeviceId != responseDeviceId) {
+            lastError =
+                'El ESP respondió como $responseDeviceId, pero se esperaba $expectedDeviceId.';
+            continue;
+          }
+
+          return data;
         }
 
         lastError = 'ESP respondió con código ${response.statusCode} en $url';
@@ -5307,10 +5560,17 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
   Future<Map<String, dynamic>> _saveInstallSensorsToEsp(
     List<Map<String, dynamic>> sensors,
   ) async {
-    final urls = [
-      'http://192.168.18.67/api/install/sensors',
-      'http://192.168.4.1/api/install/sensors',
-    ];
+    final urls = <String>[];
+
+    if (_selectedEspStaIp != null && _selectedEspStaIp!.isNotEmpty) {
+      urls.add('http://$_selectedEspStaIp/api/install/sensors');
+    }
+
+    if (_selectedEspApIp != null && _selectedEspApIp!.isNotEmpty) {
+      urls.add('http://$_selectedEspApIp/api/install/sensors');
+    }
+
+    urls.add('http://192.168.4.1/api/install/sensors');
 
     Object? lastError;
 
@@ -5327,7 +5587,22 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
             .timeout(const Duration(seconds: 5));
 
         if (response.statusCode == 200) {
-          return jsonDecode(response.body) as Map<String, dynamic>;
+          final data = jsonDecode(response.body) as Map<String, dynamic>;
+
+          final expectedDeviceId = _selectedDevice?['device_id']?.toString();
+          final responseDeviceId = data['device_id']?.toString();
+
+          if (expectedDeviceId != null &&
+              expectedDeviceId.isNotEmpty &&
+              responseDeviceId != null &&
+              responseDeviceId.isNotEmpty &&
+              expectedDeviceId != responseDeviceId) {
+            lastError =
+                'El ESP respondió como $responseDeviceId, pero se esperaba $expectedDeviceId.';
+            continue;
+          }
+
+          return data;
         }
 
         lastError = 'ESP respondió con código ${response.statusCode} en $url';
@@ -5368,6 +5643,16 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
     }
 
     final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final expectedDeviceId = scannedDevice['device_id'] ?? '';
+    final responseDeviceId = data['device_id']?.toString() ?? '';
+
+    if (expectedDeviceId.isNotEmpty &&
+        responseDeviceId.isNotEmpty &&
+        expectedDeviceId != responseDeviceId) {
+      throw Exception(
+        'El teléfono se conectó a $responseDeviceId, pero seleccionaste $expectedDeviceId.',
+      );
+    }
 
     return {
       'device_id':
@@ -5389,6 +5674,8 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
       'sensors_detected': data['sensors_detected']?.toString() ?? 'false',
       'sensors_assigned': data['sensors_assigned']?.toString() ?? 'false',
       'sta_ip': data['sta_ip']?.toString() ?? '',
+      'ap_ip': data['ap_ip']?.toString() ?? '192.168.4.1',
+      'wifi_ssid': data['wifi_ssid']?.toString() ?? '',
     };
   }
 
@@ -5681,6 +5968,193 @@ class _AssignSensorRolesSheet extends StatefulWidget {
   @override
   State<_AssignSensorRolesSheet> createState() =>
       _AssignSensorRolesSheetState();
+}
+
+class _InitialConfigurationSheet extends StatefulWidget {
+  const _InitialConfigurationSheet({required this.operationMode});
+
+  final String operationMode;
+
+  @override
+  State<_InitialConfigurationSheet> createState() =>
+      _InitialConfigurationSheetState();
+}
+
+class _InitialConfigurationSheetState
+    extends State<_InitialConfigurationSheet> {
+  int _coolingLevel = 4;
+
+  bool get _isFreezer => widget.operationMode == 'freeze';
+
+  double get _setpoint {
+    if (_isFreezer) {
+      return {
+        1: -12.0,
+        2: -14.0,
+        3: -16.0,
+        4: -18.0,
+        5: -20.0,
+        6: -22.0,
+        7: -24.0,
+      }[_coolingLevel]!;
+    }
+
+    return {
+      1: 7.0,
+      2: 6.0,
+      3: 5.0,
+      4: 4.0,
+      5: 3.0,
+      6: 2.0,
+      7: 1.0,
+    }[_coolingLevel]!;
+  }
+
+  double get _differential => _isFreezer ? 3.0 : 2.0;
+
+  double get _turnOnTemperature => _setpoint + _differential;
+
+  double get _tempMaxAlarm => _turnOnTemperature + 2.0;
+
+  double get _tempMinAlarm {
+    if (_isFreezer) {
+      return _setpoint - 4.0;
+    }
+
+    return (_setpoint - 4.0) < 0 ? 0.0 : _setpoint - 4.0;
+  }
+
+  int get _minOffSeconds => 180;
+
+  @override
+  Widget build(BuildContext context) {
+    final modeLabel = _isFreezer ? 'Congelador' : 'Refrigerador';
+
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: 16,
+          right: 16,
+          top: 16,
+          bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+        ),
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Configuración inicial',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 20,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Tipo de equipo: $modeLabel',
+                style: const TextStyle(
+                  color: Color(0xFF9DB0C1),
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              const Text(
+                'Nivel de frío',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              Slider(
+                value: _coolingLevel.toDouble(),
+                min: 1,
+                max: 7,
+                divisions: 6,
+                label: _coolingLevel.toString(),
+                onChanged: (value) {
+                  setState(() {
+                    _coolingLevel = value.round();
+                  });
+                },
+              ),
+              Text(
+                'Nivel $_coolingLevel de 7',
+                style: const TextStyle(color: Color(0xFF9DB0C1)),
+              ),
+
+              const SizedBox(height: 20),
+
+              Card(
+                color: const Color(0xFF061A2E),
+                child: Padding(
+                  padding: const EdgeInsets.all(14),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Resumen calculado',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Text(
+                        'Temperatura objetivo: ${_setpoint.toStringAsFixed(1)} °C',
+                        style: const TextStyle(color: Color(0xFF9DB0C1)),
+                      ),
+                      Text(
+                        'Encendido compresor: ${_turnOnTemperature.toStringAsFixed(1)} °C',
+                        style: const TextStyle(color: Color(0xFF9DB0C1)),
+                      ),
+                      Text(
+                        'Diferencial: ${_differential.toStringAsFixed(1)} °C',
+                        style: const TextStyle(color: Color(0xFF9DB0C1)),
+                      ),
+                      Text(
+                        'Protección compresor: $_minOffSeconds segundos',
+                        style: const TextStyle(color: Color(0xFF9DB0C1)),
+                      ),
+                      Text(
+                        'Alarma baja cámara: ${_tempMinAlarm.toStringAsFixed(1)} °C',
+                        style: const TextStyle(color: Color(0xFF9DB0C1)),
+                      ),
+                      Text(
+                        'Alarma alta cámara: ${_tempMaxAlarm.toStringAsFixed(1)} °C',
+                        style: const TextStyle(color: Color(0xFF9DB0C1)),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 20),
+
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    Navigator.pop(context, {
+                      'operation_mode': widget.operationMode,
+                      'cooling_level': _coolingLevel,
+                      'setpoint': _setpoint,
+                      'differential': _differential,
+                      'min_off_seconds': _minOffSeconds,
+                      'temp_min_alarm': _tempMinAlarm,
+                      'temp_max_alarm': _tempMaxAlarm,
+                    });
+                  },
+                  child: const Text('Guardar configuración'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _AssignSensorRolesSheetState extends State<_AssignSensorRolesSheet> {

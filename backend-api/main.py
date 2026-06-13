@@ -208,7 +208,9 @@ class DeviceConfigUpdate(BaseModel):
 class CoolingLevelUpdate(BaseModel):
     cooling_level: int
 
-
+class OperationModeUpdate(BaseModel):
+    operation_mode: str
+    
 # =====================================
 # RUTAS BASICAS
 # =====================================
@@ -295,6 +297,62 @@ def receive_telemetry(data: TelemetryData):
                 "tests_completed": False,
                 "created_at": now_iso,
                 "updated_at": now_iso,
+            },
+            merge=True,
+        )
+
+        db.collection("device_config").document(data.device_id).set(
+            {
+                "device_id": data.device_id,
+                "config_version": 1,
+                "operation_mode": "refrigerate",
+                "cooling_level": 4,
+                "config_source": "installation_default",
+                "config_pending": False,
+                "updated_at": now_iso,
+                "last_config_ack_at": None,
+                "compressor": {
+                    "enabled": True,
+                    "setpoint": 4.0,
+                    "differential": 2.0,
+                    "min_off_seconds": 180,
+                    "control_sensor_role": "chamber",
+                    "force_off_on_sensor_error": True,
+                },
+                "sensors": [],
+                "defrost": {
+                    "enabled": False,
+                    "mode": "time",
+                    "interval_minutes": 360,
+                    "duration_minutes": 20,
+                    "end_sensor_role": "evaporator",
+                    "end_temperature": 8.0,
+                    "drip_time_seconds": 120,
+                },
+                "outputs": {
+                    "compressor": {
+                        "enabled": True,
+                        "pin": 26,
+                    },
+                    "fan": {
+                        "enabled": True,
+                        "pin": 14,
+                    },
+                    "defrost": {
+                        "enabled": True,
+                        "pin": 27,
+                    },
+                    "alarm": {
+                        "enabled": False,
+                        "pin": None,
+                    },
+                },
+                "safety": {
+                    "offline_mode": "local_control",
+                    "sensor_error_action": "compressor_off",
+                    "max_compressor_runtime_minutes": 0,
+                },
+                "created_at": now_iso,
             },
             merge=True,
         )
@@ -868,6 +926,83 @@ def get_device_control(device_id: str):
         "alarm_reason": status.get("alarm_reason"),
     }
 
+
+@app.post("/api/devices/{device_id}/operation-mode")
+def update_device_operation_mode(device_id: str, data: OperationModeUpdate):
+
+    if data.operation_mode not in ["refrigerate", "freeze"]:
+        return {
+            "success": False,
+            "message": "operation_mode must be refrigerate or freeze",
+        }
+
+    config_ref = db.collection("device_config").document(device_id)
+    config_doc = config_ref.get()
+
+    if not config_doc.exists:
+        return {
+            "success": False,
+            "message": "Device config not found",
+        }
+
+    cooling_level = 4
+
+    if data.operation_mode == "freeze":
+        setpoint = -18.0
+        differential = 3.0
+        temp_min_alarm = -22.0
+        temp_max_alarm = -13.0
+    else:
+        setpoint = 4.0
+        differential = 2.0
+        temp_min_alarm = 0.0
+        temp_max_alarm = 8.0
+
+    config = config_doc.to_dict() or {}
+
+    compressor = config.get("compressor", {})
+    compressor["setpoint"] = setpoint
+    compressor["differential"] = differential
+    compressor["min_off_seconds"] = compressor.get("min_off_seconds", 180)
+    compressor["control_sensor_role"] = compressor.get(
+        "control_sensor_role", "chamber"
+    )
+    compressor["enabled"] = compressor.get("enabled", True)
+
+    sensors = config.get("sensors", [])
+
+    for sensor in sensors:
+        if sensor.get("role") == "chamber":
+            sensor["alarm_enabled"] = True
+            sensor["temp_min_alarm"] = temp_min_alarm
+            sensor["temp_max_alarm"] = temp_max_alarm
+
+    now_iso = datetime.now().isoformat()
+
+    config_ref.set(
+        {
+            "operation_mode": data.operation_mode,
+            "cooling_level": cooling_level,
+            "config_source": "installation_basic",
+            "compressor": compressor,
+            "sensors": sensors,
+            "config_pending": True,
+            "updated_at": now_iso,
+        },
+        merge=True,
+    )
+
+    return {
+        "success": True,
+        "device_id": device_id,
+        "operation_mode": data.operation_mode,
+        "cooling_level": cooling_level,
+        "setpoint": setpoint,
+        "differential": differential,
+        "temp_min_alarm": temp_min_alarm,
+        "temp_max_alarm": temp_max_alarm,
+        "config_pending": True,
+    }
 
 @app.post("/api/devices/{device_id}/cooling-level")
 def update_device_cooling_level(device_id: str, data: CoolingLevelUpdate):

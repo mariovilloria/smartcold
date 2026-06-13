@@ -2004,6 +2004,9 @@ void responderDeviceInfo()
   doc["wifi_status"] = wifiEstado;
   doc["wifi_error"] = wifiUltimoError;
   doc["wifi_backend_verified"] = wifiBackendVerificado;
+  doc["sta_ip"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
+  doc["ap_ip"] = WiFi.softAPIP().toString();
+  doc["wifi_ssid"] = WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "";
 
   JsonArray detectedSensors = doc["detected_sensors"].to<JsonArray>();
 
@@ -2182,6 +2185,10 @@ void responderWifiStatus()
   doc["backend_verified"] = wifiBackendVerificado;
   doc["error"] = wifiUltimoError;
   doc["ip"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
+  doc["sta_ip"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
+  doc["ap_ip"] = WiFi.softAPIP().toString();
+  doc["wifi_ssid"] = WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "";
+  doc["device_id"] = DEVICE_ID;
   doc["rssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
 
   String respuesta;
