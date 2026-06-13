@@ -44,8 +44,8 @@ devices_db: Dict[str, dict] = {}
 class TelemetryData(BaseModel):
     device_id: str
 
-    temperature: float
-    humidity: float
+    temperature: Optional[float] = None
+    humidity: Optional[float] = None
     rssi: int
     online: bool
 
@@ -255,7 +255,26 @@ def receive_telemetry(data: TelemetryData):
     now_iso = now.isoformat()
     connection_status = "online"
     seconds_since_last_seen = 0
+    if (
+        data.configured is False
+        and data.provisioning_status == "pending_installation"
+        and data.temperature is None
+        and data.humidity is None
+    ):
+        print("⚙️ Telemetría SETUP recibida. No se crean documentos todavía.")
 
+        return {
+            "success": True,
+            "message": "Setup telemetry ignored until installation has real data",
+            "config_pending": False,
+        }
+
+    if data.temperature is None or data.humidity is None:
+        return {
+            "success": False,
+            "message": "temperature and humidity are required for operational telemetry",
+            "config_pending": False,
+        }
     status_doc = db.collection("device_status").document(data.device_id).get()
     current_status = status_doc.to_dict() if status_doc.exists else {}
     device_ref = db.collection("devices").document(data.device_id)
@@ -939,11 +958,7 @@ def update_device_operation_mode(device_id: str, data: OperationModeUpdate):
     config_ref = db.collection("device_config").document(device_id)
     config_doc = config_ref.get()
 
-    if not config_doc.exists:
-        return {
-            "success": False,
-            "message": "Device config not found",
-        }
+    config = config_doc.to_dict() if config_doc.exists else {}
 
     cooling_level = 4
 
@@ -958,16 +973,19 @@ def update_device_operation_mode(device_id: str, data: OperationModeUpdate):
         temp_min_alarm = 0.0
         temp_max_alarm = 8.0
 
-    config = config_doc.to_dict() or {}
+    now_iso = datetime.now().isoformat()
 
     compressor = config.get("compressor", {})
+    compressor["enabled"] = False
     compressor["setpoint"] = setpoint
     compressor["differential"] = differential
     compressor["min_off_seconds"] = compressor.get("min_off_seconds", 180)
     compressor["control_sensor_role"] = compressor.get(
         "control_sensor_role", "chamber"
     )
-    compressor["enabled"] = compressor.get("enabled", True)
+    compressor["force_off_on_sensor_error"] = compressor.get(
+        "force_off_on_sensor_error", True
+    )
 
     sensors = config.get("sensors", [])
 
@@ -977,20 +995,52 @@ def update_device_operation_mode(device_id: str, data: OperationModeUpdate):
             sensor["temp_min_alarm"] = temp_min_alarm
             sensor["temp_max_alarm"] = temp_max_alarm
 
-    now_iso = datetime.now().isoformat()
+    update_data = {
+        "device_id": device_id,
+        "config_version": config.get("config_version", 1),
+        "operation_mode": data.operation_mode,
+        "cooling_level": cooling_level,
+        "config_source": "installation_step_3",
+        "config_pending": False,
+        "updated_at": now_iso,
+        "last_config_ack_at": config.get("last_config_ack_at"),
+        "compressor": compressor,
+        "sensors": sensors,
+        "defrost": config.get(
+            "defrost",
+            {
+                "enabled": False,
+                "mode": "time",
+                "interval_minutes": 360,
+                "duration_minutes": 20,
+                "end_sensor_role": "evaporator",
+                "end_temperature": 8.0,
+                "drip_time_seconds": 120,
+            },
+        ),
+        "outputs": config.get(
+            "outputs",
+            {
+                "compressor": {"enabled": True, "pin": 26},
+                "fan": {"enabled": True, "pin": 14},
+                "defrost": {"enabled": True, "pin": 27},
+                "alarm": {"enabled": False, "pin": None},
+            },
+        ),
+        "safety": config.get(
+            "safety",
+            {
+                "offline_mode": "local_control",
+                "sensor_error_action": "compressor_off",
+                "max_compressor_runtime_minutes": 0,
+            },
+        ),
+    }
 
-    config_ref.set(
-        {
-            "operation_mode": data.operation_mode,
-            "cooling_level": cooling_level,
-            "config_source": "installation_basic",
-            "compressor": compressor,
-            "sensors": sensors,
-            "config_pending": True,
-            "updated_at": now_iso,
-        },
-        merge=True,
-    )
+    if not config_doc.exists:
+        update_data["created_at"] = now_iso
+
+    config_ref.set(update_data, merge=True)
 
     return {
         "success": True,
@@ -1001,7 +1051,7 @@ def update_device_operation_mode(device_id: str, data: OperationModeUpdate):
         "differential": differential,
         "temp_min_alarm": temp_min_alarm,
         "temp_max_alarm": temp_max_alarm,
-        "config_pending": True,
+        "config_pending": False,
     }
 
 @app.post("/api/devices/{device_id}/cooling-level")
