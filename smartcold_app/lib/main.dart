@@ -4129,13 +4129,18 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
   bool _connectionVerified = false;
   bool _sensorsDetected = false;
   bool _sensorRolesAssigned = false;
+  //bool get _canConfigureWifi => _selectedDevice != null;
 
-  final List<String> _mockDetectedSensors = [
-    '28FF641D8A01AB12',
-    '28FF641D8A01CD34',
-  ];
+  //bool get _canDetectSensors => _wifiConfigured && _connectionVerified;
 
-  Map<String, String> _assignedSensorRoles = {};
+  bool get _canAssignRoles => _sensorsDetected && _detectedSensors.isNotEmpty;
+
+  bool get _canConfigureParameters => _canAssignRoles && _sensorRolesAssigned;
+
+  //bool get _canRunTests => false; // luego la conectaremos al paso 5
+
+  List<Map<String, dynamic>> _detectedSensors = [];
+  Map<String, Map<String, dynamic>> _assignedSensorsByAddress = {};
 
   Map<String, String>? _selectedDevice;
 
@@ -4358,7 +4363,33 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
                   showMessage('Leyendo información del dispositivo...');
 
                   final deviceInfo = await _fetchEspDeviceInfo(selected);
+                  Map<String, dynamic>? sensorsResult;
+                  List<Map<String, dynamic>> sensors = [];
+                  final assigned = <String, Map<String, dynamic>>{};
 
+                  try {
+                    sensorsResult = await _fetchInstallSensorsFromEsp();
+
+                    final sensorsRaw = sensorsResult['sensors'];
+
+                    sensors = sensorsRaw is List
+                        ? sensorsRaw
+                              .whereType<Map>()
+                              .map((item) => Map<String, dynamic>.from(item))
+                              .toList()
+                        : <Map<String, dynamic>>[];
+
+                    for (final sensor in sensors) {
+                      final address = sensor['address']?.toString() ?? '';
+                      final configured = sensor['configured'] == true;
+
+                      if (address.isNotEmpty && configured) {
+                        assigned[address] = Map<String, dynamic>.from(sensor);
+                      }
+                    }
+                  } catch (_) {
+                    sensorsResult = null;
+                  }
                   if (!context.mounted) return;
                   closeMessage();
 
@@ -4379,16 +4410,36 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
                     if (espConfigured) {
                       _wifiConfigured = true;
                       _connectionVerified = true;
-                      _sensorsDetected = true;
-                      _sensorRolesAssigned = true;
+
+                      _detectedSensors = sensors;
+                      _assignedSensorsByAddress = assigned;
+
+                      _sensorsDetected =
+                          sensorsResult?['sensors_detected'] == true ||
+                          sensors.isNotEmpty;
+
+                      _sensorRolesAssigned =
+                          sensorsResult?['sensors_assigned'] == true ||
+                          assigned.isNotEmpty;
+
                       _configuredWifiName = espWifiSsid.isEmpty
                           ? null
                           : espWifiSsid;
                     } else {
                       _wifiConfigured = espWifiConfigured;
                       _connectionVerified = espConnectionVerified;
-                      _sensorsDetected = espSensorsDetected;
-                      _sensorRolesAssigned = espSensorsAssigned;
+
+                      _detectedSensors = sensors;
+                      _assignedSensorsByAddress = assigned;
+
+                      _sensorsDetected =
+                          sensorsResult?['sensors_detected'] == true ||
+                          sensors.isNotEmpty;
+
+                      _sensorRolesAssigned =
+                          sensorsResult?['sensors_assigned'] == true ||
+                          assigned.isNotEmpty;
+
                       _configuredWifiName = espWifiSsid.isEmpty
                           ? null
                           : espWifiSsid;
@@ -4397,7 +4448,8 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
                         _connectionVerified = false;
                         _sensorsDetected = false;
                         _sensorRolesAssigned = false;
-                        _assignedSensorRoles = {};
+                        _detectedSensors = [];
+                        _assignedSensorsByAddress = {};
                         _configuredWifiName = null;
                       }
                     }
@@ -4413,15 +4465,6 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
 
                     if (!context.mounted) return;
                   }
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        isSameDevice
-                            ? 'Conexión reconfirmada con el dispositivo.'
-                            : 'Conexión exitosa con el dispositivo.',
-                      ),
-                    ),
-                  );
                 } catch (error) {
                   if (!context.mounted) return;
 
@@ -4759,7 +4802,7 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
                     ),
                     subtitle: Text(
                       _sensorsDetected
-                          ? 'Se detectaron 2 sondas DS18B20.'
+                          ? 'Se detectaron ${_detectedSensors.length} sonda${_detectedSensors.length == 1 ? '' : 's'} DS18B20.'
                           : 'Buscar sensores conectados al bus OneWire.',
                       style: const TextStyle(color: Color(0xFF9DB0C1)),
                     ),
@@ -4771,67 +4814,281 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
                           ? const Color(0xFF20D76D)
                           : Colors.white,
                     ),
-                    onTap: () {
-                      setState(() {
-                        _sensorsDetected = true;
-                      });
+                    onTap: () async {
+                      try {
+                        _showBlockingMessage('Detectando sondas conectadas...');
+
+                        final result = await _fetchInstallSensorsFromEsp();
+
+                        if (!context.mounted) return;
+                        _closeBlockingMessage();
+
+                        final sensorsRaw = result['sensors'];
+
+                        final sensors = sensorsRaw is List
+                            ? sensorsRaw
+                                  .whereType<Map>()
+                                  .map(
+                                    (item) => Map<String, dynamic>.from(item),
+                                  )
+                                  .toList()
+                            : <Map<String, dynamic>>[];
+
+                        setState(() {
+                          _detectedSensors = sensors;
+                          _sensorsDetected =
+                              result['sensors_detected'] == true ||
+                              sensors.isNotEmpty;
+                          _sensorRolesAssigned =
+                              result['sensors_assigned'] == true;
+                        });
+
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              sensors.isEmpty
+                                  ? 'No se detectaron sondas.'
+                                  : 'Se detectaron ${sensors.length} sonda${sensors.length == 1 ? '' : 's'}.',
+                            ),
+                          ),
+                        );
+                      } catch (error) {
+                        if (!context.mounted) return;
+                        _closeBlockingMessage();
+
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('Error detectando sondas: $error'),
+                          ),
+                        );
+                      }
                     },
                   ),
                 ),
-                if (_sensorsDetected) ...[
-                  const SizedBox(height: 14),
-                  Card(
-                    color: const Color(0xFF061A2E),
-                    child: ListTile(
-                      leading: const Icon(
-                        Icons.cable_rounded,
-                        color: Color(0xFF00A8FF),
-                      ),
-                      title: const Text(
-                        '4. Asignar roles de sondas',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w900,
-                        ),
-                      ),
-                      subtitle: Text(
-                        _sensorRolesAssigned
-                            ? 'Roles asignados: cámara y evaporador.'
-                            : 'Indicar qué sonda corresponde a cada parte del equipo.',
-                        style: const TextStyle(color: Color(0xFF9DB0C1)),
-                      ),
-                      trailing: Icon(
-                        _sensorRolesAssigned
-                            ? Icons.check_circle_rounded
-                            : Icons.chevron_right_rounded,
-                        color: _sensorRolesAssigned
-                            ? const Color(0xFF20D76D)
-                            : Colors.white,
-                      ),
-                      onTap: () async {
-                        final result =
-                            await showModalBottomSheet<Map<String, String>>(
-                              context: context,
-                              isScrollControlled: true,
-                              backgroundColor: const Color(0xFF020B14),
-                              builder: (context) {
-                                return _AssignSensorRolesSheet(
-                                  sensors: _mockDetectedSensors,
-                                  initialRoles: _assignedSensorRoles,
-                                );
-                              },
-                            );
-
-                        if (result == null) return;
-
-                        setState(() {
-                          _assignedSensorRoles = result;
-                          _sensorRolesAssigned = true;
-                        });
-                      },
+                const SizedBox(height: 14),
+                Card(
+                  color: !_canAssignRoles
+                      ? const Color(0xFF101820)
+                      : const Color(0xFF061A2E),
+                  child: ListTile(
+                    leading: Icon(
+                      Icons.cable_rounded,
+                      color: !_canAssignRoles
+                          ? Colors.grey
+                          : const Color(0xFF00A8FF),
                     ),
+                    title: const Text(
+                      '4. Asignar roles de sondas',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    subtitle: Text(
+                      _sensorRolesAssigned
+                          ? 'Roles asignados: cámara y evaporador.'
+                          : 'Indicar qué sonda corresponde a cada parte del equipo.',
+                      style: const TextStyle(color: Color(0xFF9DB0C1)),
+                    ),
+                    trailing: Icon(
+                      !_canAssignRoles
+                          ? Icons.lock_rounded
+                          : _sensorRolesAssigned
+                          ? Icons.check_circle_rounded
+                          : Icons.chevron_right_rounded,
+                      color: !_canAssignRoles
+                          ? Colors.grey
+                          : _sensorRolesAssigned
+                          ? const Color(0xFF20D76D)
+                          : Colors.white,
+                    ),
+                    onTap: !_canAssignRoles
+                        ? null
+                        : () async {
+                            try {
+                              _showBlockingMessage(
+                                'Actualizando sondas desde el SmartCold...',
+                              );
+
+                              final sensorsResult =
+                                  await _fetchInstallSensorsFromEsp();
+
+                              if (!context.mounted) return;
+                              _closeBlockingMessage();
+
+                              final sensorsRaw = sensorsResult['sensors'];
+
+                              final sensors = sensorsRaw is List
+                                  ? sensorsRaw
+                                        .whereType<Map>()
+                                        .map(
+                                          (item) =>
+                                              Map<String, dynamic>.from(item),
+                                        )
+                                        .toList()
+                                  : <Map<String, dynamic>>[];
+
+                              final assigned = <String, Map<String, dynamic>>{};
+
+                              for (final sensor in sensors) {
+                                final address =
+                                    sensor['address']?.toString() ?? '';
+                                final configured = sensor['configured'] == true;
+
+                                if (address.isNotEmpty && configured) {
+                                  assigned[address] = Map<String, dynamic>.from(
+                                    sensor,
+                                  );
+                                }
+                              }
+
+                              setState(() {
+                                _detectedSensors = sensors;
+                                _assignedSensorsByAddress = assigned;
+                                _sensorsDetected =
+                                    sensorsResult['sensors_detected'] == true ||
+                                    sensors.isNotEmpty;
+                                _sensorRolesAssigned =
+                                    sensorsResult['sensors_assigned'] == true ||
+                                    assigned.isNotEmpty;
+                              });
+                            } catch (error) {
+                              if (!context.mounted) return;
+                              _closeBlockingMessage();
+
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    'No se pudieron actualizar las sondas: $error',
+                                  ),
+                                ),
+                              );
+                              return;
+                            }
+                            final result =
+                                await showModalBottomSheet<
+                                  Map<String, Map<String, dynamic>>
+                                >(
+                                  context: context,
+                                  isScrollControlled: true,
+                                  backgroundColor: const Color(0xFF020B14),
+                                  builder: (context) {
+                                    return _AssignSensorRolesSheet(
+                                      sensors: _detectedSensors,
+                                      initialSensors: _assignedSensorsByAddress,
+                                    );
+                                  },
+                                );
+
+                            if (result == null) return;
+
+                            try {
+                              _showBlockingMessage(
+                                'Guardando sensores en el SmartCold...',
+                              );
+
+                              final sensorsToSave = result.values.toList();
+
+                              await _saveInstallSensorsToEsp(sensorsToSave);
+                              final refreshedResult =
+                                  await _fetchInstallSensorsFromEsp();
+
+                              final refreshedRaw = refreshedResult['sensors'];
+
+                              final refreshedSensors = refreshedRaw is List
+                                  ? refreshedRaw
+                                        .whereType<Map>()
+                                        .map(
+                                          (item) =>
+                                              Map<String, dynamic>.from(item),
+                                        )
+                                        .toList()
+                                  : <Map<String, dynamic>>[];
+
+                              final refreshedAssigned =
+                                  <String, Map<String, dynamic>>{};
+
+                              for (final sensor in refreshedSensors) {
+                                final address =
+                                    sensor['address']?.toString() ?? '';
+                                final configured = sensor['configured'] == true;
+
+                                if (address.isNotEmpty && configured) {
+                                  refreshedAssigned[address] =
+                                      Map<String, dynamic>.from(sensor);
+                                }
+                              }
+                              if (!context.mounted) return;
+                              _closeBlockingMessage();
+
+                              setState(() {
+                                _detectedSensors = refreshedSensors;
+                                _assignedSensorsByAddress = refreshedAssigned;
+                                _sensorsDetected =
+                                    refreshedResult['sensors_detected'] ==
+                                        true ||
+                                    refreshedSensors.isNotEmpty;
+                                _sensorRolesAssigned =
+                                    refreshedResult['sensors_assigned'] ==
+                                        true ||
+                                    refreshedAssigned.isNotEmpty;
+                              });
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text(
+                                    'Sensores guardados correctamente.',
+                                  ),
+                                ),
+                              );
+                            } catch (error) {
+                              if (!context.mounted) return;
+                              _closeBlockingMessage();
+
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    'Error guardando sensores: $error',
+                                  ),
+                                ),
+                              );
+                            }
+                          },
                   ),
-                ],
+                ),
+                const SizedBox(height: 14),
+                Card(
+                  color: !_canConfigureParameters
+                      ? const Color(0xFF101820)
+                      : const Color(0xFF061A2E),
+                  child: ListTile(
+                    leading: Icon(
+                      Icons.tune_rounded,
+                      color: !_canConfigureParameters
+                          ? Colors.grey
+                          : const Color(0xFF00A8FF),
+                    ),
+                    title: const Text(
+                      '5. Configuración inicial',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    subtitle: const Text(
+                      'Configurar parámetros de operación.',
+                      style: TextStyle(color: Color(0xFF9DB0C1)),
+                    ),
+                    trailing: Icon(
+                      !_canConfigureParameters
+                          ? Icons.lock_rounded
+                          : Icons.chevron_right_rounded,
+                      color: !_canConfigureParameters
+                          ? Colors.grey
+                          : Colors.white,
+                    ),
+                    onTap: !_canConfigureParameters ? null : () async {},
+                  ),
+                ),
               ],
             ],
           ],
@@ -5020,6 +5277,68 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
     return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
+  Future<Map<String, dynamic>> _fetchInstallSensorsFromEsp() async {
+    final urls = [
+      'http://192.168.18.67/api/install/sensors',
+      'http://192.168.4.1/api/install/sensors',
+    ];
+
+    Object? lastError;
+
+    for (final url in urls) {
+      try {
+        final response = await http
+            .get(Uri.parse(url))
+            .timeout(const Duration(seconds: 4));
+
+        if (response.statusCode == 200) {
+          return jsonDecode(response.body) as Map<String, dynamic>;
+        }
+
+        lastError = 'ESP respondió con código ${response.statusCode} en $url';
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    throw Exception('No se pudo consultar sensores del ESP: $lastError');
+  }
+
+  Future<Map<String, dynamic>> _saveInstallSensorsToEsp(
+    List<Map<String, dynamic>> sensors,
+  ) async {
+    final urls = [
+      'http://192.168.18.67/api/install/sensors',
+      'http://192.168.4.1/api/install/sensors',
+    ];
+
+    Object? lastError;
+
+    final body = jsonEncode({'sensors': sensors});
+
+    for (final url in urls) {
+      try {
+        final response = await http
+            .post(
+              Uri.parse(url),
+              headers: {'Content-Type': 'application/json'},
+              body: body,
+            )
+            .timeout(const Duration(seconds: 5));
+
+        if (response.statusCode == 200) {
+          return jsonDecode(response.body) as Map<String, dynamic>;
+        }
+
+        lastError = 'ESP respondió con código ${response.statusCode} en $url';
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    throw Exception('No se pudo guardar sensores en el ESP: $lastError');
+  }
+
   Future<bool> _connectToEspAccessPoint(String ssid) async {
     final connected = await WiFiForIoTPlugin.connect(
       ssid,
@@ -5069,6 +5388,7 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
       'configured_wifi_ssid': data['configured_wifi_ssid']?.toString() ?? '',
       'sensors_detected': data['sensors_detected']?.toString() ?? 'false',
       'sensors_assigned': data['sensors_assigned']?.toString() ?? 'false',
+      'sta_ip': data['sta_ip']?.toString() ?? '',
     };
   }
 
@@ -5352,11 +5672,11 @@ class _WifiConfigSheetState extends State<_WifiConfigSheet> {
 class _AssignSensorRolesSheet extends StatefulWidget {
   const _AssignSensorRolesSheet({
     required this.sensors,
-    required this.initialRoles,
+    required this.initialSensors,
   });
 
-  final List<String> sensors;
-  final Map<String, String> initialRoles;
+  final List<Map<String, dynamic>> sensors;
+  final Map<String, Map<String, dynamic>> initialSensors;
 
   @override
   State<_AssignSensorRolesSheet> createState() =>
@@ -5364,28 +5684,93 @@ class _AssignSensorRolesSheet extends StatefulWidget {
 }
 
 class _AssignSensorRolesSheetState extends State<_AssignSensorRolesSheet> {
-  late Map<String, String> _rolesBySensor;
-
-  final List<String> _availableRoles = ['camara', 'evaporador', 'ambiente'];
+  late Map<String, Map<String, dynamic>> _sensorsByAddress;
+  String? _error;
+  final List<Map<String, String>> _availableRoles = const [
+    {'value': '', 'label': 'Sin asignar'},
+    {'value': 'chamber', 'label': 'Cámara'},
+    {'value': 'evaporator', 'label': 'Evaporador'},
+    {'value': 'condenser', 'label': 'Condensador'},
+    {'value': 'compressor', 'label': 'Compresor'},
+    {'value': 'ambient', 'label': 'Ambiente'},
+    {'value': 'aux1', 'label': 'Auxiliar 1'},
+    {'value': 'aux2', 'label': 'Auxiliar 2'},
+    {'value': 'aux3', 'label': 'Auxiliar 3'},
+  ];
 
   @override
   void initState() {
     super.initState();
-    _rolesBySensor = Map<String, String>.from(widget.initialRoles);
+    _sensorsByAddress = Map<String, Map<String, dynamic>>.from(
+      widget.initialSensors,
+    );
+
+    for (final sensor in widget.sensors) {
+      final address = sensor['address']?.toString() ?? '';
+      if (address.isEmpty) continue;
+
+      _sensorsByAddress.putIfAbsent(address, () {
+        return {
+          'id': sensor['id']?.toString() ?? '',
+          'type': sensor['type']?.toString() ?? 'ds18b20',
+          'role': sensor['role']?.toString() ?? '',
+          'name': sensor['name']?.toString() ?? 'Sin asignar',
+          'address': address,
+          'enabled': sensor['configured'] == true,
+          'offset': sensor['offset'] ?? 0,
+          'alarm_enabled': sensor['alarm_enabled'] ?? false,
+          'temp_min_alarm': sensor['temp_min_alarm'] ?? -100,
+          'temp_max_alarm': sensor['temp_max_alarm'] ?? 100,
+          'can_stop_compressor': sensor['can_stop_compressor'] ?? false,
+        };
+      });
+    }
+  }
+
+  String _defaultNameForRole(String role) {
+    switch (role) {
+      case 'chamber':
+        return 'Cámara';
+      case 'evaporator':
+        return 'Evaporador';
+      case 'condenser':
+        return 'Condensador';
+      case 'compressor':
+        return 'Compresor';
+      case 'ambient':
+        return 'Ambiente';
+      case 'aux1':
+        return 'Auxiliar 1';
+      case 'aux2':
+        return 'Auxiliar 2';
+      case 'aux3':
+        return 'Auxiliar 3';
+      default:
+        return 'Sin asignar';
+    }
   }
 
   void _submit() {
-    final hasCamera = _rolesBySensor.containsValue('camara');
-    final hasEvaporator = _rolesBySensor.containsValue('evaporador');
+    final selected = _sensorsByAddress.values.where((sensor) {
+      final role = sensor['role']?.toString() ?? '';
+      return role.isNotEmpty;
+    }).toList();
 
-    if (!hasCamera || !hasEvaporator) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Debes asignar cámara y evaporador.')),
-      );
+    final hasChamber = selected.any(
+      (sensor) => sensor['role']?.toString() == 'chamber',
+    );
+
+    if (!hasChamber) {
+      setState(() {
+        _error = 'Debes asignar una sonda como Cámara para continuar.';
+      });
       return;
     }
 
-    Navigator.pop(context, _rolesBySensor);
+    Navigator.pop(context, {
+      for (final sensor in selected)
+        sensor['address'].toString(): Map<String, dynamic>.from(sensor),
+    });
   }
 
   @override
@@ -5398,8 +5783,8 @@ class _AssignSensorRolesSheetState extends State<_AssignSensorRolesSheet> {
           top: 16,
           bottom: MediaQuery.of(context).viewInsets.bottom + 16,
         ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+        child: ListView(
+          shrinkWrap: true,
           children: [
             const Text(
               'Asignar roles de sondas',
@@ -5410,61 +5795,124 @@ class _AssignSensorRolesSheetState extends State<_AssignSensorRolesSheet> {
               ),
             ),
             const SizedBox(height: 12),
-            ...widget.sensors.map((sensorId) {
+            ...widget.sensors.map((sensor) {
+              final address = sensor['address']?.toString() ?? '';
+              final current = _sensorsByAddress[address] ?? {};
+              final selectedRole = current['role']?.toString();
+              final nameController = TextEditingController(
+                text: current['name']?.toString() ?? '',
+              );
+
               return Card(
                 color: const Color(0xFF061A2E),
-                child: ListTile(
-                  leading: const Icon(
-                    Icons.thermostat_rounded,
-                    color: Color(0xFF00A8FF),
-                  ),
-                  title: Text(
-                    sensorId,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  subtitle: DropdownButtonHideUnderline(
-                    child: DropdownButton<String>(
-                      value: _rolesBySensor[sensorId],
-                      hint: const Text(
-                        'Seleccionar rol',
-                        style: TextStyle(color: Color(0xFF9DB0C1)),
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        address,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w900,
+                        ),
                       ),
-                      dropdownColor: const Color(0xFF061A2E),
-                      isExpanded: true,
-                      items: _availableRoles.map((role) {
-                        return DropdownMenuItem<String>(
-                          value: role,
-                          child: Text(
-                            role,
-                            style: const TextStyle(color: Colors.white),
+                      const SizedBox(height: 6),
+                      Text(
+                        'Temperatura: ${sensor['temperature'] ?? '—'} °C',
+                        style: const TextStyle(color: Color(0xFF9DB0C1)),
+                      ),
+                      const SizedBox(height: 12),
+                      DropdownButtonHideUnderline(
+                        child: DropdownButton<String>(
+                          value: selectedRole != null && selectedRole.isNotEmpty
+                              ? selectedRole
+                              : null,
+                          hint: const Text(
+                            'Seleccionar rol',
+                            style: TextStyle(color: Color(0xFF9DB0C1)),
                           ),
-                        );
-                      }).toList(),
-                      onChanged: (value) {
-                        if (value == null) return;
+                          dropdownColor: const Color(0xFF061A2E),
+                          isExpanded: true,
+                          items: _availableRoles.map((role) {
+                            return DropdownMenuItem<String>(
+                              value: role['value'],
+                              child: Text(
+                                role['label'] ?? '',
+                                style: const TextStyle(color: Colors.white),
+                              ),
+                            );
+                          }).toList(),
+                          onChanged: (value) {
+                            if (value == null) return;
 
-                        setState(() {
-                          _rolesBySensor.removeWhere(
-                            (sensor, role) => role == value,
-                          );
-                          _rolesBySensor[sensorId] = value;
-                        });
-                      },
-                    ),
+                            setState(() {
+                              _error = null;
+                              if ([
+                                'chamber',
+                                'evaporator',
+                                'condenser',
+                                'compressor',
+                                'ambient',
+                              ].contains(value)) {
+                                _sensorsByAddress.forEach((key, item) {
+                                  if (item['role'] == value) {
+                                    item['role'] = '';
+                                    item['name'] = 'Sin asignar';
+                                    item['enabled'] = false;
+                                  }
+                                });
+                              }
+
+                              final item = _sensorsByAddress[address]!;
+
+                              if (value.isEmpty) {
+                                item['role'] = '';
+                                item['name'] = 'Sin asignar';
+                                item['enabled'] = false;
+                              } else {
+                                item['role'] = value;
+                                item['name'] = _defaultNameForRole(value);
+                                item['enabled'] = true;
+                              }
+                            });
+                          },
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      TextField(
+                        controller: nameController,
+                        onChanged: (value) {
+                          _sensorsByAddress[address]?['name'] = value.trim();
+                        },
+                        decoration: const InputDecoration(
+                          labelText: 'Nombre visible',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               );
             }),
+            if (_error != null) ...[
+              const SizedBox(height: 10),
+              Text(
+                _error!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: Colors.redAccent,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
             const SizedBox(height: 14),
             SizedBox(
               width: double.infinity,
               child: ElevatedButton.icon(
                 onPressed: _submit,
                 icon: const Icon(Icons.check_rounded),
-                label: const Text('Guardar roles'),
+                label: const Text('Guardar sensores'),
               ),
             ),
           ],
@@ -5662,8 +6110,17 @@ class InstallationWizardPage extends StatelessWidget {
                         backgroundColor: const Color(0xFF020B14),
                         builder: (context) {
                           return _AssignSensorRolesSheet(
-                            sensors: sensors,
-                            initialRoles: currentRoles,
+                            sensors: sensors
+                                .map(
+                                  (address) => {
+                                    'address': address,
+                                    'type': 'ds18b20',
+                                    'temperature': null,
+                                    'configured': false,
+                                  },
+                                )
+                                .toList(),
+                            initialSensors: {},
                           );
                         },
                       );

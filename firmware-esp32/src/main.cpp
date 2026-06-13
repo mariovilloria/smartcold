@@ -2577,7 +2577,7 @@ void loop()
       Serial.println("⚙️ Modo instalacion local activo. AP/API esperando app.");
     }
 
-    if (WiFi.status() == WL_CONNECTED)
+    if (WiFi.status() == WL_CONNECTED && !wifiConfiguracionPendiente)
     {
       if (millis() - ultimaTelemetriaInstalacion >= 30000)
       {
@@ -2585,7 +2585,11 @@ void loop()
         enviarTelemetria();
       }
 
-      if (millis() - ultimaConfigInstalacion >= INTERVALO_CONFIG_MS)
+      if (
+          millis() - ultimaConfigInstalacion >= INTERVALO_CONFIG_MS &&
+          installationPhase != "pending_sensor_detection" &&
+          installationPhase != "sensors_setup" &&
+          installationPhase != "pending_initial_configuration")
       {
         ultimaConfigInstalacion = millis();
         descargarConfiguracion();
