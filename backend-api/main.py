@@ -980,9 +980,7 @@ def update_device_operation_mode(device_id: str, data: OperationModeUpdate):
     compressor["setpoint"] = setpoint
     compressor["differential"] = differential
     compressor["min_off_seconds"] = compressor.get("min_off_seconds", 180)
-    compressor["control_sensor_role"] = compressor.get(
-        "control_sensor_role", "chamber"
-    )
+    compressor["control_sensor_role"] = None
     compressor["force_off_on_sensor_error"] = compressor.get(
         "force_off_on_sensor_error", True
     )

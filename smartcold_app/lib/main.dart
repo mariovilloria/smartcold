@@ -4129,19 +4129,26 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
   bool _connectionVerified = false;
   bool _sensorsDetected = false;
   bool _sensorRolesAssigned = false;
-  String _operationMode = 'refrigerate';
-  String _pendingOperationMode = 'refrigerate';
+  String? _operationMode;
+  String? _pendingOperationMode;
   String? _selectedEspStaIp;
   String? _selectedEspApIp;
-  //bool get _canConfigureWifi => _selectedDevice != null;
+  bool get _deviceSelected => _selectedDevice != null;
 
-  //bool get _canDetectSensors => _wifiConfigured && _connectionVerified;
+  bool get _operationModeConfigured => _operationMode != null;
 
-  bool get _canAssignRoles => _sensorsDetected && _detectedSensors.isNotEmpty;
+  bool get _canConfigureWifi => _deviceSelected;
+
+  bool get _canConfigureOperationMode =>
+      _canConfigureWifi && _wifiConfigured && _connectionVerified;
+
+  bool get _canDetectSensors =>
+      _canConfigureOperationMode && _operationModeConfigured;
+
+  bool get _canAssignRoles =>
+      _canDetectSensors && _sensorsDetected && _detectedSensors.isNotEmpty;
 
   bool get _canConfigureParameters => _canAssignRoles && _sensorRolesAssigned;
-
-  //bool get _canRunTests => false; // luego la conectaremos al paso 5
 
   List<Map<String, dynamic>> _detectedSensors = [];
   Map<String, Map<String, dynamic>> _assignedSensorsByAddress = {};
@@ -4367,37 +4374,18 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
                   showMessage('Leyendo información del dispositivo...');
 
                   final deviceInfo = await _fetchEspDeviceInfo(selected);
-                  Map<String, dynamic>? sensorsResult;
-                  List<Map<String, dynamic>> sensors = [];
-                  final assigned = <String, Map<String, dynamic>>{};
+                  Map<String, dynamic>? configSummary;
 
                   try {
-                    sensorsResult = await _fetchInstallSensorsFromEsp();
-
-                    final sensorsRaw = sensorsResult['sensors'];
-
-                    sensors = sensorsRaw is List
-                        ? sensorsRaw
-                              .whereType<Map>()
-                              .map((item) => Map<String, dynamic>.from(item))
-                              .toList()
-                        : <Map<String, dynamic>>[];
-
-                    for (final sensor in sensors) {
-                      final address = sensor['address']?.toString() ?? '';
-                      final configured = sensor['configured'] == true;
-
-                      if (address.isNotEmpty && configured) {
-                        assigned[address] = Map<String, dynamic>.from(sensor);
-                      }
-                    }
+                    configSummary = await _fetchConfigSummaryFromBackend(
+                      deviceInfo['device_id'] ?? '',
+                    );
                   } catch (_) {
-                    sensorsResult = null;
+                    configSummary = null;
                   }
                   if (!context.mounted) return;
                   closeMessage();
 
-                  final espConfigured = deviceInfo['configured'] == 'true';
                   final espWifiConfigured =
                       deviceInfo['wifi_configured'] == 'true';
                   final espConnectionVerified =
@@ -4412,53 +4400,37 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
                     _selectedDevice = deviceInfo;
                     _selectedEspStaIp = deviceInfo['sta_ip'];
                     _selectedEspApIp = deviceInfo['ap_ip'];
+                    final backendOperationMode =
+                        configSummary?['operation_mode']?.toString();
+
+                    if (backendOperationMode == 'refrigerate' ||
+                        backendOperationMode == 'freeze') {
+                      _operationMode = backendOperationMode;
+                    }
                     _pendingOperationMode = _operationMode;
 
-                    if (espConfigured) {
-                      _wifiConfigured = true;
-                      _connectionVerified = true;
+                    _wifiConfigured = espWifiConfigured;
+                    _connectionVerified =
+                        espWifiConfigured && espConnectionVerified;
 
-                      _detectedSensors = sensors;
-                      _assignedSensorsByAddress = assigned;
+                    _configuredWifiName = espWifiSsid.isEmpty
+                        ? null
+                        : espWifiSsid;
 
-                      _sensorsDetected =
-                          sensorsResult?['sensors_detected'] == true ||
-                          sensors.isNotEmpty;
+                    _sensorsDetected = espSensorsDetected;
+                    _sensorRolesAssigned = espSensorsAssigned;
 
-                      _sensorRolesAssigned =
-                          sensorsResult?['sensors_assigned'] == true ||
-                          assigned.isNotEmpty;
+                    if (!_sensorsDetected) {
+                      _detectedSensors = [];
+                    }
 
-                      _configuredWifiName = espWifiSsid.isEmpty
-                          ? null
-                          : espWifiSsid;
-                    } else {
-                      _wifiConfigured = espWifiConfigured;
-                      _connectionVerified = espConnectionVerified;
+                    if (!_sensorRolesAssigned) {
+                      _assignedSensorsByAddress = {};
+                    }
 
-                      _detectedSensors = sensors;
-                      _assignedSensorsByAddress = assigned;
-
-                      _sensorsDetected =
-                          sensorsResult?['sensors_detected'] == true ||
-                          sensors.isNotEmpty;
-
-                      _sensorRolesAssigned =
-                          sensorsResult?['sensors_assigned'] == true ||
-                          assigned.isNotEmpty;
-
-                      _configuredWifiName = espWifiSsid.isEmpty
-                          ? null
-                          : espWifiSsid;
-
-                      if (!espWifiConfigured) {
-                        _connectionVerified = false;
-                        _sensorsDetected = false;
-                        _sensorRolesAssigned = false;
-                        _detectedSensors = [];
-                        _assignedSensorsByAddress = {};
-                        _configuredWifiName = null;
-                      }
+                    if (!espWifiConfigured) {
+                      _connectionVerified = false;
+                      _configuredWifiName = null;
                     }
                   });
                   if (espWifiConfigured || espConnectionVerified) {
@@ -4488,161 +4460,6 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
           ),
 
           if (_selectedDevice != null) ...[
-            const SizedBox(height: 18),
-            Card(
-              color: const Color(0xFF061A2E),
-              child: Column(
-                children: [
-                  ListTile(
-                    leading: const Icon(
-                      Icons.kitchen_rounded,
-                      color: Color(0xFF00A8FF),
-                    ),
-                    title: const Text(
-                      'Tipo de equipo',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                    subtitle: Text(
-                      _pendingOperationMode == 'freeze'
-                          ? 'Congelador'
-                          : 'Refrigerador',
-                      style: const TextStyle(color: Color(0xFF9DB0C1)),
-                    ),
-                    trailing: const Icon(
-                      Icons.chevron_right_rounded,
-                      color: Colors.white,
-                    ),
-                    onTap: () async {
-                      final selected = await showModalBottomSheet<String>(
-                        context: context,
-                        backgroundColor: const Color(0xFF020B14),
-                        builder: (context) {
-                          return SafeArea(
-                            child: ListView(
-                              padding: const EdgeInsets.all(16),
-                              children: [
-                                const Text(
-                                  'Selecciona el tipo de equipo',
-                                  style: TextStyle(
-                                    color: Colors.white,
-                                    fontSize: 20,
-                                    fontWeight: FontWeight.w900,
-                                  ),
-                                ),
-                                const SizedBox(height: 12),
-                                Card(
-                                  color: const Color(0xFF061A2E),
-                                  child: ListTile(
-                                    leading: const Icon(
-                                      Icons.ac_unit_rounded,
-                                      color: Color(0xFF00A8FF),
-                                    ),
-                                    title: const Text(
-                                      'Refrigerador',
-                                      style: TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.w900,
-                                      ),
-                                    ),
-                                    subtitle: const Text(
-                                      'Rango típico sobre 0 °C.',
-                                      style: TextStyle(
-                                        color: Color(0xFF9DB0C1),
-                                      ),
-                                    ),
-                                    onTap: () =>
-                                        Navigator.pop(context, 'refrigerate'),
-                                  ),
-                                ),
-                                Card(
-                                  color: const Color(0xFF061A2E),
-                                  child: ListTile(
-                                    leading: const Icon(
-                                      Icons.severe_cold_rounded,
-                                      color: Color(0xFF00A8FF),
-                                    ),
-                                    title: const Text(
-                                      'Congelador',
-                                      style: TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.w900,
-                                      ),
-                                    ),
-                                    subtitle: const Text(
-                                      'Rango típico bajo 0 °C.',
-                                      style: TextStyle(
-                                        color: Color(0xFF9DB0C1),
-                                      ),
-                                    ),
-                                    onTap: () =>
-                                        Navigator.pop(context, 'freeze'),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          );
-                        },
-                      );
-
-                      if (selected == null) return;
-
-                      setState(() {
-                        _pendingOperationMode = selected;
-                      });
-                    },
-                  ),
-                  if (_pendingOperationMode != _operationMode)
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                      child: SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton.icon(
-                          onPressed: () async {
-                            try {
-                              final result = await _saveOperationModeToBackend(
-                                _pendingOperationMode,
-                              );
-
-                              if (!mounted) return;
-
-                              setState(() {
-                                _operationMode = _pendingOperationMode;
-                              });
-
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                    _operationMode == 'freeze'
-                                        ? 'Tipo de equipo guardado: Congelador'
-                                        : 'Tipo de equipo guardado: Refrigerador',
-                                  ),
-                                ),
-                              );
-
-                              debugPrint('Operation mode actualizado: $result');
-                            } catch (e) {
-                              if (!mounted) return;
-
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                    'Error guardando tipo de equipo: $e',
-                                  ),
-                                ),
-                              );
-                            }
-                          },
-                          icon: const Icon(Icons.save_rounded),
-                          label: const Text('Guardar cambio de tipo'),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
             const SizedBox(height: 14),
             Card(
               color: const Color(0xFF061A2E),
@@ -4944,347 +4761,457 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
                 },
               ),
             ),
-            if (_wifiConfigured) ...[
-              const SizedBox(height: 14),
-              if (_connectionVerified) ...[
-                const SizedBox(height: 14),
-                Card(
-                  color: const Color(0xFF061A2E),
-                  child: ListTile(
-                    leading: const Icon(
-                      Icons.thermostat_rounded,
-                      color: Color(0xFF00A8FF),
+
+            const SizedBox(height: 18),
+            Card(
+              color: !_canConfigureOperationMode
+                  ? const Color(0xFF101820)
+                  : const Color(0xFF061A2E),
+              child: Column(
+                children: [
+                  ListTile(
+                    leading: Icon(
+                      Icons.kitchen_rounded,
+                      color: !_canConfigureOperationMode
+                          ? Colors.grey
+                          : const Color(0xFF00A8FF),
                     ),
                     title: const Text(
-                      '3. Detectar sondas',
+                      '3. Tipo de equipo',
                       style: TextStyle(
                         color: Colors.white,
                         fontWeight: FontWeight.w900,
                       ),
                     ),
                     subtitle: Text(
-                      _sensorsDetected
-                          ? 'Se detectaron ${_detectedSensors.length} sonda${_detectedSensors.length == 1 ? '' : 's'} DS18B20.'
-                          : 'Buscar sensores conectados al bus OneWire.',
+                      _pendingOperationMode == null
+                          ? 'Sin definir'
+                          : _pendingOperationMode == 'freeze'
+                          ? 'Congelador'
+                          : 'Refrigerador',
                       style: const TextStyle(color: Color(0xFF9DB0C1)),
                     ),
                     trailing: Icon(
-                      _sensorsDetected
+                      !_canConfigureOperationMode
+                          ? Icons.lock_rounded
+                          : _operationModeConfigured
                           ? Icons.check_circle_rounded
                           : Icons.chevron_right_rounded,
-                      color: _sensorsDetected
+                      color: !_canConfigureOperationMode
+                          ? Colors.grey
+                          : _operationModeConfigured
                           ? const Color(0xFF20D76D)
                           : Colors.white,
                     ),
-                    onTap: () async {
-                      try {
-                        _showBlockingMessage('Detectando sondas conectadas...');
+                    onTap: !_canConfigureOperationMode
+                        ? null
+                        : () async {
+                            final selected = await showModalBottomSheet<String>(
+                              context: context,
+                              backgroundColor: const Color(0xFF020B14),
+                              builder: (context) {
+                                return SafeArea(
+                                  child: ListView(
+                                    padding: const EdgeInsets.all(16),
+                                    children: [
+                                      const Text(
+                                        'Selecciona el tipo de equipo',
+                                        style: TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 20,
+                                          fontWeight: FontWeight.w900,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 12),
+                                      Card(
+                                        color: const Color(0xFF061A2E),
+                                        child: ListTile(
+                                          leading: const Icon(
+                                            Icons.ac_unit_rounded,
+                                            color: Color(0xFF00A8FF),
+                                          ),
+                                          title: const Text(
+                                            'Refrigerador',
+                                            style: TextStyle(
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.w900,
+                                            ),
+                                          ),
+                                          subtitle: const Text(
+                                            'Rango típico sobre 0 °C.',
+                                            style: TextStyle(
+                                              color: Color(0xFF9DB0C1),
+                                            ),
+                                          ),
+                                          onTap: () => Navigator.pop(
+                                            context,
+                                            'refrigerate',
+                                          ),
+                                        ),
+                                      ),
+                                      Card(
+                                        color: const Color(0xFF061A2E),
+                                        child: ListTile(
+                                          leading: const Icon(
+                                            Icons.severe_cold_rounded,
+                                            color: Color(0xFF00A8FF),
+                                          ),
+                                          title: const Text(
+                                            'Congelador',
+                                            style: TextStyle(
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.w900,
+                                            ),
+                                          ),
+                                          subtitle: const Text(
+                                            'Rango típico bajo 0 °C.',
+                                            style: TextStyle(
+                                              color: Color(0xFF9DB0C1),
+                                            ),
+                                          ),
+                                          onTap: () =>
+                                              Navigator.pop(context, 'freeze'),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            );
 
-                        final result = await _fetchInstallSensorsFromEsp();
+                            if (selected == null) return;
 
-                        if (!context.mounted) return;
-                        _closeBlockingMessage();
+                            setState(() {
+                              _pendingOperationMode = selected;
+                            });
+                          },
+                  ),
+                  if (_wifiConfigured &&
+                      _connectionVerified &&
+                      _pendingOperationMode != _operationMode)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                      child: SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          onPressed: () async {
+                            try {
+                              if (_pendingOperationMode == null) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text(
+                                      'Seleccione un tipo de equipo.',
+                                    ),
+                                  ),
+                                );
+                                return;
+                              }
 
-                        final sensorsRaw = result['sensors'];
+                              final result = await _saveOperationModeToBackend(
+                                _pendingOperationMode!,
+                              );
 
-                        final sensors = sensorsRaw is List
-                            ? sensorsRaw
-                                  .whereType<Map>()
-                                  .map(
-                                    (item) => Map<String, dynamic>.from(item),
-                                  )
-                                  .toList()
-                            : <Map<String, dynamic>>[];
+                              if (!mounted) return;
+
+                              setState(() {
+                                _operationMode = _pendingOperationMode;
+                              });
+
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    _operationMode == 'freeze'
+                                        ? 'Tipo de equipo guardado: Congelador'
+                                        : 'Tipo de equipo guardado: Refrigerador',
+                                  ),
+                                ),
+                              );
+
+                              debugPrint('Operation mode actualizado: $result');
+                            } catch (e) {
+                              if (!mounted) return;
+
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    'Error guardando tipo de equipo: $e',
+                                  ),
+                                ),
+                              );
+                            }
+                          },
+                          icon: const Icon(Icons.save_rounded),
+                          label: const Text('Guardar cambio de tipo'),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 14),
+            Card(
+              color: !_canDetectSensors
+                  ? const Color(0xFF101820)
+                  : const Color(0xFF061A2E),
+              child: ListTile(
+                leading: Icon(
+                  Icons.cable_rounded,
+                  color: !_canDetectSensors
+                      ? Colors.grey
+                      : const Color(0xFF00A8FF),
+                ),
+                title: const Text(
+                  '4. Sensores y roles',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                subtitle: Text(
+                  _sensorRolesAssigned
+                      ? 'Sensores detectados y roles asignados.'
+                      : _sensorsDetected
+                      ? 'Se detectaron ${_detectedSensors.length} sonda${_detectedSensors.length == 1 ? '' : 's'}. Falta asignar roles.'
+                      : 'Detectar sondas y asignar su función en el equipo.',
+                  style: const TextStyle(color: Color(0xFF9DB0C1)),
+                ),
+                trailing: Icon(
+                  !_canDetectSensors
+                      ? Icons.lock_rounded
+                      : _sensorRolesAssigned
+                      ? Icons.check_circle_rounded
+                      : Icons.chevron_right_rounded,
+                  color: !_canDetectSensors
+                      ? Colors.grey
+                      : _sensorRolesAssigned
+                      ? const Color(0xFF20D76D)
+                      : Colors.white,
+                ),
+                onTap: !_canDetectSensors
+                    ? null
+                    : () async {
+                        try {
+                          _showBlockingMessage(
+                            'Conectando con el SmartCold...',
+                          );
+
+                          final deviceId =
+                              _selectedDevice?['device_id']?.toString() ?? '';
+
+                          if (deviceId.isEmpty) {
+                            throw Exception('No hay dispositivo seleccionado.');
+                          }
+
+                          await _connectToEspAccessPoint(deviceId);
+
+                          if (!context.mounted) return;
+
+                          _closeBlockingMessage();
+                          _showBlockingMessage(
+                            'Leyendo sensores conectados...',
+                          );
+
+                          final sensorsResult =
+                              await _fetchInstallSensorsFromEsp();
+
+                          if (!context.mounted) return;
+                          _closeBlockingMessage();
+
+                          final sensorsRaw = sensorsResult['sensors'];
+
+                          final sensors = sensorsRaw is List
+                              ? sensorsRaw
+                                    .whereType<Map>()
+                                    .map(
+                                      (item) => Map<String, dynamic>.from(item),
+                                    )
+                                    .toList()
+                              : <Map<String, dynamic>>[];
+
+                          final assigned = <String, Map<String, dynamic>>{};
+
+                          for (final sensor in sensors) {
+                            final address = sensor['address']?.toString() ?? '';
+                            final configured = sensor['configured'] == true;
+
+                            if (address.isNotEmpty && configured) {
+                              assigned[address] = Map<String, dynamic>.from(
+                                sensor,
+                              );
+                            }
+                          }
+
+                          setState(() {
+                            _detectedSensors = sensors;
+                            _assignedSensorsByAddress = assigned;
+                            _sensorsDetected =
+                                sensorsResult['sensors_detected'] == true ||
+                                sensors.isNotEmpty;
+                            _sensorRolesAssigned =
+                                sensorsResult['sensors_assigned'] == true ||
+                                assigned.isNotEmpty;
+                          });
+
+                          if (sensors.isEmpty) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('No se detectaron sondas.'),
+                              ),
+                            );
+                            return;
+                          }
+
+                          final result =
+                              await showModalBottomSheet<
+                                Map<String, Map<String, dynamic>>
+                              >(
+                                context: context,
+                                isScrollControlled: true,
+                                backgroundColor: const Color(0xFF020B14),
+                                builder: (context) {
+                                  return _AssignSensorRolesSheet(
+                                    sensors: sensors,
+                                    initialSensors: assigned,
+                                  );
+                                },
+                              );
+
+                          if (result == null) return;
+
+                          _showBlockingMessage(
+                            'Guardando sensores en el SmartCold...',
+                          );
+
+                          final sensorsToSave = result.values.toList();
+
+                          await _saveInstallSensorsToEsp(sensorsToSave);
+
+                          final refreshedResult =
+                              await _fetchInstallSensorsFromEsp();
+
+                          final refreshedRaw = refreshedResult['sensors'];
+
+                          final refreshedSensors = refreshedRaw is List
+                              ? refreshedRaw
+                                    .whereType<Map>()
+                                    .map(
+                                      (item) => Map<String, dynamic>.from(item),
+                                    )
+                                    .toList()
+                              : <Map<String, dynamic>>[];
+
+                          final refreshedAssigned =
+                              <String, Map<String, dynamic>>{};
+
+                          for (final sensor in refreshedSensors) {
+                            final address = sensor['address']?.toString() ?? '';
+                            final configured = sensor['configured'] == true;
+
+                            if (address.isNotEmpty && configured) {
+                              refreshedAssigned[address] =
+                                  Map<String, dynamic>.from(sensor);
+                            }
+                          }
+
+                          if (!context.mounted) return;
+                          _closeBlockingMessage();
+
+                          setState(() {
+                            _detectedSensors = refreshedSensors;
+                            _assignedSensorsByAddress = refreshedAssigned;
+                            _sensorsDetected =
+                                refreshedResult['sensors_detected'] == true ||
+                                refreshedSensors.isNotEmpty;
+                            _sensorRolesAssigned =
+                                refreshedResult['sensors_assigned'] == true ||
+                                refreshedAssigned.isNotEmpty;
+                          });
+
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text(
+                                'Sensores y roles guardados correctamente.',
+                              ),
+                            ),
+                          );
+
+                          await _releaseEspAccessPointConnection();
+                        } catch (error) {
+                          if (!context.mounted) return;
+                          _closeBlockingMessage();
+
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(
+                                'Error configurando sensores: $error',
+                              ),
+                            ),
+                          );
+                        }
+                      },
+              ),
+            ),
+            const SizedBox(height: 14),
+            Card(
+              color: !_canConfigureParameters
+                  ? const Color(0xFF101820)
+                  : const Color(0xFF061A2E),
+              child: ListTile(
+                leading: Icon(
+                  Icons.tune_rounded,
+                  color: !_canConfigureParameters
+                      ? Colors.grey
+                      : const Color(0xFF00A8FF),
+                ),
+                title: const Text(
+                  '5. Configuración inicial',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                subtitle: const Text(
+                  'Configurar parámetros de operación.',
+                  style: TextStyle(color: Color(0xFF9DB0C1)),
+                ),
+                trailing: Icon(
+                  !_canConfigureParameters
+                      ? Icons.lock_rounded
+                      : Icons.chevron_right_rounded,
+                  color: !_canConfigureParameters ? Colors.grey : Colors.white,
+                ),
+                onTap: !_canConfigureParameters
+                    ? null
+                    : () async {
+                        final result =
+                            await showModalBottomSheet<Map<String, dynamic>>(
+                              context: context,
+                              isScrollControlled: true,
+                              backgroundColor: const Color(0xFF020B14),
+                              builder: (context) {
+                                return _InitialConfigurationSheet(
+                                  operationMode:
+                                      _operationMode ?? 'refrigerate',
+                                );
+                              },
+                            );
+
+                        if (result == null) return;
 
                         setState(() {
-                          _detectedSensors = sensors;
-                          _sensorsDetected =
-                              result['sensors_detected'] == true ||
-                              sensors.isNotEmpty;
-                          _sensorRolesAssigned =
-                              result['sensors_assigned'] == true;
+                          _operationMode =
+                              result['operation_mode']?.toString() ??
+                              _operationMode;
                         });
 
                         ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text(
-                              sensors.isEmpty
-                                  ? 'No se detectaron sondas.'
-                                  : 'Se detectaron ${sensors.length} sonda${sensors.length == 1 ? '' : 's'}.',
-                            ),
+                          const SnackBar(
+                            content: Text('Configuración inicial preparada.'),
                           ),
                         );
-                      } catch (error) {
-                        if (!context.mounted) return;
-                        _closeBlockingMessage();
-
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text('Error detectando sondas: $error'),
-                          ),
-                        );
-                      }
-                    },
-                  ),
-                ),
-                const SizedBox(height: 14),
-                Card(
-                  color: !_canAssignRoles
-                      ? const Color(0xFF101820)
-                      : const Color(0xFF061A2E),
-                  child: ListTile(
-                    leading: Icon(
-                      Icons.cable_rounded,
-                      color: !_canAssignRoles
-                          ? Colors.grey
-                          : const Color(0xFF00A8FF),
-                    ),
-                    title: const Text(
-                      '4. Asignar roles de sondas',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                    subtitle: Text(
-                      _sensorRolesAssigned
-                          ? 'Roles asignados: cámara y evaporador.'
-                          : 'Indicar qué sonda corresponde a cada parte del equipo.',
-                      style: const TextStyle(color: Color(0xFF9DB0C1)),
-                    ),
-                    trailing: Icon(
-                      !_canAssignRoles
-                          ? Icons.lock_rounded
-                          : _sensorRolesAssigned
-                          ? Icons.check_circle_rounded
-                          : Icons.chevron_right_rounded,
-                      color: !_canAssignRoles
-                          ? Colors.grey
-                          : _sensorRolesAssigned
-                          ? const Color(0xFF20D76D)
-                          : Colors.white,
-                    ),
-                    onTap: !_canAssignRoles
-                        ? null
-                        : () async {
-                            try {
-                              _showBlockingMessage(
-                                'Actualizando sondas desde el SmartCold...',
-                              );
-
-                              final sensorsResult =
-                                  await _fetchInstallSensorsFromEsp();
-
-                              if (!context.mounted) return;
-                              _closeBlockingMessage();
-
-                              final sensorsRaw = sensorsResult['sensors'];
-
-                              final sensors = sensorsRaw is List
-                                  ? sensorsRaw
-                                        .whereType<Map>()
-                                        .map(
-                                          (item) =>
-                                              Map<String, dynamic>.from(item),
-                                        )
-                                        .toList()
-                                  : <Map<String, dynamic>>[];
-
-                              final assigned = <String, Map<String, dynamic>>{};
-
-                              for (final sensor in sensors) {
-                                final address =
-                                    sensor['address']?.toString() ?? '';
-                                final configured = sensor['configured'] == true;
-
-                                if (address.isNotEmpty && configured) {
-                                  assigned[address] = Map<String, dynamic>.from(
-                                    sensor,
-                                  );
-                                }
-                              }
-
-                              setState(() {
-                                _detectedSensors = sensors;
-                                _assignedSensorsByAddress = assigned;
-                                _sensorsDetected =
-                                    sensorsResult['sensors_detected'] == true ||
-                                    sensors.isNotEmpty;
-                                _sensorRolesAssigned =
-                                    sensorsResult['sensors_assigned'] == true ||
-                                    assigned.isNotEmpty;
-                              });
-                            } catch (error) {
-                              if (!context.mounted) return;
-                              _closeBlockingMessage();
-
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                    'No se pudieron actualizar las sondas: $error',
-                                  ),
-                                ),
-                              );
-                              return;
-                            }
-                            final result =
-                                await showModalBottomSheet<
-                                  Map<String, Map<String, dynamic>>
-                                >(
-                                  context: context,
-                                  isScrollControlled: true,
-                                  backgroundColor: const Color(0xFF020B14),
-                                  builder: (context) {
-                                    return _AssignSensorRolesSheet(
-                                      sensors: _detectedSensors,
-                                      initialSensors: _assignedSensorsByAddress,
-                                    );
-                                  },
-                                );
-
-                            if (result == null) return;
-
-                            try {
-                              _showBlockingMessage(
-                                'Guardando sensores en el SmartCold...',
-                              );
-
-                              final sensorsToSave = result.values.toList();
-
-                              await _saveInstallSensorsToEsp(sensorsToSave);
-                              final refreshedResult =
-                                  await _fetchInstallSensorsFromEsp();
-
-                              final refreshedRaw = refreshedResult['sensors'];
-
-                              final refreshedSensors = refreshedRaw is List
-                                  ? refreshedRaw
-                                        .whereType<Map>()
-                                        .map(
-                                          (item) =>
-                                              Map<String, dynamic>.from(item),
-                                        )
-                                        .toList()
-                                  : <Map<String, dynamic>>[];
-
-                              final refreshedAssigned =
-                                  <String, Map<String, dynamic>>{};
-
-                              for (final sensor in refreshedSensors) {
-                                final address =
-                                    sensor['address']?.toString() ?? '';
-                                final configured = sensor['configured'] == true;
-
-                                if (address.isNotEmpty && configured) {
-                                  refreshedAssigned[address] =
-                                      Map<String, dynamic>.from(sensor);
-                                }
-                              }
-                              if (!context.mounted) return;
-                              _closeBlockingMessage();
-
-                              setState(() {
-                                _detectedSensors = refreshedSensors;
-                                _assignedSensorsByAddress = refreshedAssigned;
-                                _sensorsDetected =
-                                    refreshedResult['sensors_detected'] ==
-                                        true ||
-                                    refreshedSensors.isNotEmpty;
-                                _sensorRolesAssigned =
-                                    refreshedResult['sensors_assigned'] ==
-                                        true ||
-                                    refreshedAssigned.isNotEmpty;
-                              });
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text(
-                                    'Sensores guardados correctamente.',
-                                  ),
-                                ),
-                              );
-                            } catch (error) {
-                              if (!context.mounted) return;
-                              _closeBlockingMessage();
-
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                    'Error guardando sensores: $error',
-                                  ),
-                                ),
-                              );
-                            }
-                          },
-                  ),
-                ),
-                const SizedBox(height: 14),
-                Card(
-                  color: !_canConfigureParameters
-                      ? const Color(0xFF101820)
-                      : const Color(0xFF061A2E),
-                  child: ListTile(
-                    leading: Icon(
-                      Icons.tune_rounded,
-                      color: !_canConfigureParameters
-                          ? Colors.grey
-                          : const Color(0xFF00A8FF),
-                    ),
-                    title: const Text(
-                      '5. Configuración inicial',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                    subtitle: const Text(
-                      'Configurar parámetros de operación.',
-                      style: TextStyle(color: Color(0xFF9DB0C1)),
-                    ),
-                    trailing: Icon(
-                      !_canConfigureParameters
-                          ? Icons.lock_rounded
-                          : Icons.chevron_right_rounded,
-                      color: !_canConfigureParameters
-                          ? Colors.grey
-                          : Colors.white,
-                    ),
-                    onTap: !_canConfigureParameters
-                        ? null
-                        : () async {
-                            final result =
-                                await showModalBottomSheet<
-                                  Map<String, dynamic>
-                                >(
-                                  context: context,
-                                  isScrollControlled: true,
-                                  backgroundColor: const Color(0xFF020B14),
-                                  builder: (context) {
-                                    return _InitialConfigurationSheet(
-                                      operationMode: _operationMode,
-                                    );
-                                  },
-                                );
-
-                            if (result == null) return;
-
-                            setState(() {
-                              _operationMode =
-                                  result['operation_mode']?.toString() ??
-                                  _operationMode;
-                            });
-
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text(
-                                  'Configuración inicial preparada.',
-                                ),
-                              ),
-                            );
-                          },
-                  ),
-                ),
-              ],
-            ],
+                      },
+              ),
+            ),
           ],
         ],
       ),
@@ -5327,6 +5254,26 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
         );
       },
     );
+  }
+
+  Future<Map<String, dynamic>?> _fetchConfigSummaryFromBackend(
+    String deviceId,
+  ) async {
+    final response = await http
+        .get(
+          Uri.parse(
+            'https://smartcold-api-649501100610.us-central1.run.app/api/devices/$deviceId/config-summary',
+          ),
+        )
+        .timeout(const Duration(seconds: 8));
+
+    if (response.statusCode != 200) return null;
+
+    final body = jsonDecode(response.body) as Map<String, dynamic>;
+
+    if (body['success'] != true) return null;
+
+    return body;
   }
 
   void _showBlockingMessage(String message) {
