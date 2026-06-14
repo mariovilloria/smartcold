@@ -1021,9 +1021,9 @@ def update_device_operation_mode(device_id: str, data: OperationModeUpdate):
         "outputs": config.get(
             "outputs",
             {
-                "compressor": {"enabled": True, "pin": 26},
-                "fan": {"enabled": True, "pin": 14},
-                "defrost": {"enabled": True, "pin": 27},
+                "compressor": {"enabled": False, "pin": 26},
+                "fan": {"enabled": False, "pin": 14},
+                "defrost": {"enabled": False, "pin": 27},
                 "alarm": {"enabled": False, "pin": None},
             },
         ),
