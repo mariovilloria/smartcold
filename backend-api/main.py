@@ -1004,35 +1004,6 @@ def update_device_operation_mode(device_id: str, data: OperationModeUpdate):
         "last_config_ack_at": config.get("last_config_ack_at"),
         "compressor": compressor,
         "sensors": sensors,
-        "defrost": config.get(
-            "defrost",
-            {
-                "enabled": False,
-                "mode": "time",
-                "interval_minutes": 360,
-                "duration_minutes": 20,
-                "end_sensor_role": "evaporator",
-                "end_temperature": 8.0,
-                "drip_time_seconds": 120,
-            },
-        ),
-        "outputs": config.get(
-            "outputs",
-            {
-                "compressor": {"enabled": False, "pin": 26},
-                "fan": {"enabled": False, "pin": 14},
-                "defrost": {"enabled": False, "pin": 27},
-                "alarm": {"enabled": False, "pin": None},
-            },
-        ),
-        "safety": config.get(
-            "safety",
-            {
-                "offline_mode": "local_control",
-                "sensor_error_action": "compressor_off",
-                "max_compressor_runtime_minutes": 0,
-            },
-        ),
     }
 
     if not config_doc.exists:
@@ -1120,13 +1091,16 @@ def update_device_cooling_level(device_id: str, data: CoolingLevelUpdate):
     now_iso = datetime.now().isoformat()
 
     update_data = {
-        "operation_mode": operation_mode,
-        "cooling_level": data.cooling_level,
-        "config_source": "client_profile",
-        "compressor": compressor,
-        "sensors": sensors,
-        "config_pending": True,
+        "device_id": device_id,
+        "config_version": config.get("config_version", 1),
+        "operation_mode": data.operation_mode,
+        "cooling_level": cooling_level,
+        "config_source": "installation_step_3",
+        "config_pending": False,
         "updated_at": now_iso,
+        "last_config_ack_at": config.get("last_config_ack_at"),
+        "compressor": compressor,
+        "sensors": config.get("sensors", []),
     }
 
     config_ref.set(update_data, merge=True)
