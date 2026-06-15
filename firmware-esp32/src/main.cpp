@@ -15,6 +15,8 @@ const bool BORRAR_CONFIG_SMARTCOLD_AL_INICIAR = false;
 const String FIRMWARE_VERSION = "0.2.0-provisioning";
 unsigned long ultimoIntentoConfig = 0;
 const unsigned long INTERVALO_CONFIG_MS = 60000;
+String configOperationMode = "";
+int configCoolingLevel = 4;
 // const unsigned long INTERVALO_CONFIG_MS = 15UL * 60UL * 1000UL;
 
 unsigned long ultimoIntentoWifi = 0;
@@ -126,7 +128,7 @@ String configControlSensorRole = "chamber";
 String configUpdatedAt = "";
 float temperaturaActual = 7.0;
 float temperaturaEvaporador = NAN;
-String sensorCamaraAddress = "285150C0000000AB";
+String sensorCamaraAddress = "";
 String sensorEvaporadorAddress = "";
 
 bool compressorShouldBeOn = false;
@@ -150,31 +152,84 @@ String wifiEstado = "idle";
 String wifiUltimoError = "";
 bool wifiBackendVerificado = false;
 unsigned long wifiProcesarDespuesDeMs = 0;
-String installationPhase = "wifi_setup";
+//====================================================
+// ESTADO DE INSTALACION
+//====================================================
+
+bool installationCompleted = false;
+
+String installationStatus = "NEW";
+// NEW
+// INSTALLING
+// COMMISSIONED
+
+String installationSessionId = "";
+
+String installationPhase = "pending_device";
+
+String installerUid = "";
+
 bool installationWifiConfigured = false;
 bool installationConnectionVerified = false;
-String installationWifiSsid = "";
 bool installationSensorsDetected = false;
 bool installationSensorsAssigned = false;
 
+String installationWifiSsid = "";
+
 void guardarEstadoInstalacionLocal()
 {
+  preferences.putBool("inst_done", installationCompleted);
+
+  preferences.putString("inst_status", installationStatus);
+
+  preferences.putString("inst_session", installationSessionId);
+
+  preferences.putString("installer_uid", installerUid);
+
   preferences.putString("inst_phase", installationPhase);
+
   preferences.putBool("inst_wifi_ok", installationWifiConfigured);
+
   preferences.putBool("inst_cloud_ok", installationConnectionVerified);
+
   preferences.putString("inst_ssid", installationWifiSsid);
+
   preferences.putBool("inst_sens_det", installationSensorsDetected);
+
   preferences.putBool("inst_sens_asg", installationSensorsAssigned);
 }
 
 void cargarEstadoInstalacionLocal()
 {
-  installationPhase = preferences.getString("inst_phase", "wifi_setup");
-  installationWifiConfigured = preferences.getBool("inst_wifi_ok", false);
-  installationConnectionVerified = preferences.getBool("inst_cloud_ok", false);
-  installationWifiSsid = preferences.getString("inst_ssid", "");
-  installationSensorsDetected = preferences.getBool("inst_sens_det", false);
-  installationSensorsAssigned = preferences.getBool("inst_sens_asg", false);
+  installationCompleted =
+      preferences.getBool("inst_done", false);
+
+  installationStatus =
+      preferences.getString("inst_status", "NEW");
+
+  installationSessionId =
+      preferences.getString("inst_session", "");
+
+  installerUid =
+      preferences.getString("installer_uid", "");
+
+  installationPhase =
+      preferences.getString("inst_phase", "pending_device");
+
+  installationWifiConfigured =
+      preferences.getBool("inst_wifi_ok", false);
+
+  installationConnectionVerified =
+      preferences.getBool("inst_cloud_ok", false);
+
+  installationWifiSsid =
+      preferences.getString("inst_ssid", "");
+
+  installationSensorsDetected =
+      preferences.getBool("inst_sens_det", false);
+
+  installationSensorsAssigned =
+      preferences.getBool("inst_sens_asg", false);
 }
 void descargarConfiguracion();
 String nombreSensorPorRole(String role);
@@ -269,6 +324,12 @@ String obtenerMotivoSaludDispositivo()
 
 void enviarTelemetria()
 {
+  if (!installationCompleted)
+  {
+    Serial.println("⚙️ Equipo no comisionado. Telemetria deshabilitada.");
+    return;
+  }
+
   if (WiFi.status() != WL_CONNECTED)
   {
     Serial.println("❌ WIFI NO CONECTADO");
@@ -286,121 +347,33 @@ void enviarTelemetria()
   doc["device_id"] = DEVICE_ID;
   doc["hardware_uid"] = HARDWARE_UID;
   doc["firmware_version"] = FIRMWARE_VERSION;
-  doc["temperature"] = temperaturaActual;
-  doc["humidity"] = 65;
   doc["rssi"] = WiFi.RSSI();
   doc["online"] = true;
+  doc["configured"] = true;
+  doc["provisioning_status"] = "commissioned";
 
-  bool configurado = tieneConfiguracionOperativa();
+  doc["temperature"] = temperaturaActual;
+  doc["humidity"] = 65;
 
-  doc["configured"] = configurado;
-  doc["provisioning_status"] = configurado ? "configured" : "pending_installation";
+  doc["device_state"] = obtenerEstadoOperativo();
+  doc["device_health"] = obtenerSaludDispositivo();
+  doc["device_health_reason"] = obtenerMotivoSaludDispositivo();
+  doc["compressor_block_reason"] = obtenerMotivoBloqueoCompresor();
 
-  if (!configurado)
-  {
-    compressorRelayOn = false;
-    compressorShouldBeOn = false;
-    compressorCanTurnOn = false;
-    defrostActive = false;
-    dripActive = false;
-    localProtectionActive = false;
-    localProtectionWaitSecondsRemaining = 0;
-
-    doc["device_state"] = "SETUP";
-    doc["device_health"] = "SETUP";
-    doc["device_health_reason"] = "PENDING_INSTALLATION";
-    doc["compressor_block_reason"] = "PENDING_INSTALLATION";
-  }
-  else
-  {
-    doc["device_state"] = obtenerEstadoOperativo();
-    doc["device_health"] = obtenerSaludDispositivo();
-    doc["device_health_reason"] = obtenerMotivoSaludDispositivo();
-    doc["compressor_block_reason"] = obtenerMotivoBloqueoCompresor();
-  }
   doc["compressor_relay_on"] = compressorRelayOn;
   doc["compressor_should_be_on"] = compressorShouldBeOn;
   doc["compressor_can_turn_on"] = compressorCanTurnOn;
   doc["compressor_wait_seconds_remaining"] = localProtectionWaitSecondsRemaining;
   doc["compressor_runtime_since_defrost_seconds"] =
       compressorRuntimeSinceDefrostSeconds;
+
   doc["defrost_active"] = defrostActive;
-  doc["defrost_interval_minutes"] =
-      configDefrostIntervalMinutes;
+  doc["defrost_interval_minutes"] = configDefrostIntervalMinutes;
+  doc["defrost_duration_minutes"] = configDefrostDurationMinutes;
+  doc["defrost_end_temperature"] = configDefrostEndTemperature;
+  doc["defrost_end_sensor_role"] = configDefrostEndSensorRole;
+  doc["drip_time_seconds"] = configDripTimeSeconds;
 
-  doc["defrost_duration_minutes"] =
-      configDefrostDurationMinutes;
-
-  doc["defrost_end_temperature"] =
-      configDefrostEndTemperature;
-
-  doc["defrost_end_sensor_role"] =
-      configDefrostEndSensorRole;
-
-  doc["drip_time_seconds"] =
-      configDripTimeSeconds;
-
-  unsigned long defrostIntervalSeconds =
-      (unsigned long)configDefrostIntervalMinutes * 60UL;
-
-  unsigned long secondsSinceLastDefrost =
-      (millis() - lastDefrostMillis) / 1000;
-
-  unsigned long defrostNextSeconds = 0;
-
-  if (!defrostActive && secondsSinceLastDefrost < defrostIntervalSeconds)
-  {
-    defrostNextSeconds =
-        defrostIntervalSeconds - secondsSinceLastDefrost;
-  }
-
-  doc["defrost_next_seconds"] = defrostNextSeconds;
-
-  if (defrostActive)
-  {
-    unsigned long defrostElapsed =
-        (millis() - defrostStartMillis) / 1000;
-
-    doc["defrost_elapsed_seconds"] = defrostElapsed;
-
-    unsigned long defrostDurationSeconds =
-        (unsigned long)configDefrostDurationMinutes * 60UL;
-
-    unsigned long defrostRemaining = 0;
-
-    if (defrostElapsed < defrostDurationSeconds)
-    {
-      defrostRemaining =
-          defrostDurationSeconds - defrostElapsed;
-    }
-
-    doc["defrost_remaining_seconds"] = defrostRemaining;
-  }
-  else
-  {
-    doc["defrost_elapsed_seconds"] = 0;
-    doc["defrost_remaining_seconds"] = 0;
-  }
-  doc["drip_active"] = dripActive;
-
-  if (dripActive)
-  {
-    unsigned long dripElapsed = (millis() - dripStartMillis) / 1000;
-    unsigned long dripRemaining = 0;
-
-    if (dripElapsed < (unsigned long)configDripTimeSeconds)
-    {
-      dripRemaining = (unsigned long)configDripTimeSeconds - dripElapsed;
-    }
-
-    doc["drip_elapsed_seconds"] = dripElapsed;
-    doc["drip_remaining_seconds"] = dripRemaining;
-  }
-  else
-  {
-    doc["drip_elapsed_seconds"] = 0;
-    doc["drip_remaining_seconds"] = 0;
-  }
   JsonArray detectedSensors = doc["detected_sensors"].to<JsonArray>();
 
   for (int i = 0; i < cantidadSensoresDetectados; i++)
@@ -415,9 +388,12 @@ void enviarTelemetria()
   {
     if (sensoresConfigurados[i].hasReading)
     {
-      sensorReadings[sensoresConfigurados[i].role] = sensoresConfigurados[i].temperature;
+      sensorReadings[sensoresConfigurados[i].role] =
+          sensoresConfigurados[i].temperature;
 
-      JsonObject alarmData = sensorAlarms[sensoresConfigurados[i].role].to<JsonObject>();
+      JsonObject alarmData =
+          sensorAlarms[sensoresConfigurados[i].role].to<JsonObject>();
+
       alarmData["in_alarm"] = sensoresConfigurados[i].inAlarm;
       alarmData["reason"] = sensoresConfigurados[i].alarmReason;
     }
@@ -520,7 +496,24 @@ void borrarConfiguracionOperativaGuardada()
   preferences.remove("drip_sec");
 
   configUpdatedAt = "";
+  cantidadSensoresConfigurados = 0;
+  sensorCamaraAddress = "";
+  sensorEvaporadorAddress = "";
+  installationCompleted = false;
+  installationStatus = "INSTALLING";
+  installationSessionId = "";
+  installerUid = "";
 
+  installationPhase = "pending_device";
+
+  installationWifiConfigured = false;
+  installationConnectionVerified = false;
+  installationWifiSsid = "";
+
+  installationSensorsDetected = false;
+  installationSensorsAssigned = false;
+
+  guardarEstadoInstalacionLocal();
   Serial.println("🧹 Configuracion operativa local eliminada.");
 }
 void confirmarConfiguracionDescargada()
@@ -1265,76 +1258,6 @@ void actualizarTemperaturaPrueba()
   }
 }
 
-void consultarControlCompresor()
-{
-  if (WiFi.status() != WL_CONNECTED)
-  {
-    Serial.println("❌ WIFI NO CONECTADO");
-    return;
-  }
-
-  HTTPClient http;
-  String url = API_BASE_URL + "/api/devices/" + DEVICE_ID + "/control";
-
-  http.begin(url);
-
-  Serial.println();
-  Serial.println("🧠 CONSULTANDO CONTROL COMPRESOR...");
-  Serial.println(url);
-
-  int httpCode = http.GET();
-
-  if (httpCode <= 0)
-  {
-    Serial.print("ERROR HTTP CONTROL: ");
-    Serial.println(http.errorToString(httpCode));
-    http.end();
-    return;
-  }
-
-  Serial.print("HTTP CONTROL CODE: ");
-  Serial.println(httpCode);
-
-  String response = http.getString();
-
-  Serial.println("RESPUESTA CONTROL:");
-  Serial.println(response);
-
-  JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, response);
-
-  if (error)
-  {
-    Serial.print("❌ ERROR JSON CONTROL: ");
-    Serial.println(error.c_str());
-    http.end();
-    return;
-  }
-
-  bool compressorShouldBeOn = doc["compressor_should_be_on"] | false;
-  bool compressorCanTurnOn = doc["compressor_can_turn_on"] | false;
-  int waitSecondsRemaining = doc["compressor_wait_seconds_remaining"] | 0;
-  compressorRelayOn = compressorShouldBeOn && compressorCanTurnOn;
-  preferences.putBool("relay_on", compressorRelayOn);
-  Serial.println();
-  Serial.println("====== ESTADO CONTROL ======");
-  Serial.print("Compresor debe encender: ");
-  Serial.println(compressorShouldBeOn ? "SI" : "NO");
-
-  Serial.print("Puede encender ahora: ");
-  Serial.println(compressorCanTurnOn ? "SI" : "NO");
-
-  Serial.print("Espera restante: ");
-  Serial.print(waitSecondsRemaining);
-  Serial.println(" segundos");
-  Serial.println("============================");
-
-  Serial.print("Relay compresor: ");
-  Serial.println(compressorRelayOn ? "ON" : "OFF");
-
-  http.end();
-}
-
 void imprimirDireccionSensor(DeviceAddress direccion)
 {
   for (uint8_t i = 0; i < 8; i++)
@@ -1698,6 +1621,8 @@ void responderInstallSensors()
   doc["hardware_uid"] = HARDWARE_UID;
   doc["firmware_version"] = FIRMWARE_VERSION;
   doc["installation_phase"] = installationPhase;
+  doc["installation_completed"] = installationCompleted;
+  doc["installation_status"] = installationStatus;
   doc["max_ds18b20_sensors"] = MAX_SENSORES_DS18B20;
   doc["configured_count"] = cantidadSensoresConfigurados;
 
@@ -1760,7 +1685,8 @@ void responderInstallSensors()
   }
 
   installationSensorsDetected = cantidadReportada > 0;
-  if (installationSensorsDetected && installationPhase == "wifi_setup")
+  if (installationSensorsDetected &&
+      (installationPhase == "pending_sensor_detection" || installationPhase == "wifi_setup"))
   {
     installationPhase = "sensors_setup";
   }
@@ -1951,6 +1877,8 @@ void responderGuardarInstallSensors()
   respuestaDoc["success"] = true;
   respuestaDoc["device_id"] = DEVICE_ID;
   respuestaDoc["installation_phase"] = installationPhase;
+  respuestaDoc["installation_completed"] = installationCompleted;
+  respuestaDoc["installation_status"] = installationStatus;
   respuestaDoc["configured_count"] = cantidadSensoresConfigurados;
   respuestaDoc["sensors_assigned"] = installationSensorsAssigned;
 
@@ -1982,24 +1910,26 @@ void responderDeviceInfo()
 {
   leerTemperaturasDS18B20();
 
-  StaticJsonDocument<1536> doc;
-
-  bool configurado = tieneConfiguracionOperativa();
+  JsonDocument doc;
 
   doc["device_id"] = DEVICE_ID;
   doc["hardware_uid"] = HARDWARE_UID;
   doc["firmware_version"] = FIRMWARE_VERSION;
+  doc["installation_completed"] = installationCompleted;
+  doc["installation_status"] = installationStatus;
+  doc["installation_session_id"] = installationSessionId;
+  doc["installer_uid"] = installerUid;
+  doc["configured"] = installationCompleted;
+  doc["provisioning_status"] = installationCompleted ? "configured" : "pending_installation";
 
-  doc["configured"] = configurado;
-  doc["provisioning_status"] = configurado ? "configured" : "pending_installation";
-
-  doc["installation_phase"] = configurado ? "completed" : installationPhase;
+  doc["installation_phase"] = installationPhase;
   doc["wifi_configured"] = installationWifiConfigured;
   doc["connection_verified"] = installationConnectionVerified;
   doc["configured_wifi_ssid"] = installationWifiSsid;
   doc["sensors_detected"] = installationSensorsDetected;
   doc["sensors_assigned"] = installationSensorsAssigned;
-
+  doc["operation_mode"] = configOperationMode;
+  doc["cooling_level"] = configCoolingLevel;
   doc["local_installation_mode"] = modoInstalacionLocalActivo;
   doc["wifi_status"] = wifiEstado;
   doc["wifi_error"] = wifiUltimoError;
@@ -2189,12 +2119,82 @@ void responderWifiStatus()
   doc["ap_ip"] = WiFi.softAPIP().toString();
   doc["wifi_ssid"] = WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "";
   doc["device_id"] = DEVICE_ID;
+  doc["installation_completed"] = installationCompleted;
+  doc["installation_status"] = installationStatus;
+  doc["installation_phase"] = installationPhase;
   doc["rssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
 
   String respuesta;
   serializeJson(doc, respuesta);
 
   servidorInstalacion.send(200, "application/json", respuesta);
+}
+
+void responderGuardarOperationMode()
+{
+  if (servidorInstalacion.method() != HTTP_POST)
+  {
+    servidorInstalacion.send(405, "application/json", "{\"success\":false,\"error\":\"METHOD_NOT_ALLOWED\"}");
+    return;
+  }
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, servidorInstalacion.arg("plain"));
+
+  if (error)
+  {
+    servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"INVALID_JSON\"}");
+    return;
+  }
+
+  String operationMode = doc["operation_mode"] | "";
+  operationMode.toLowerCase();
+
+  if (operationMode != "refrigerate" && operationMode != "freeze")
+  {
+    servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"INVALID_OPERATION_MODE\"}");
+    return;
+  }
+
+  configOperationMode = operationMode;
+  configCoolingLevel = 4;
+
+  if (operationMode == "freeze")
+  {
+    configSetpoint = -18.0;
+    configDifferential = 3.0;
+  }
+  else
+  {
+    configSetpoint = 4.0;
+    configDifferential = 2.0;
+  }
+
+  preferences.putString("op_mode", configOperationMode);
+  preferences.putInt("cool_lvl", configCoolingLevel);
+  preferences.putFloat("setpoint", configSetpoint);
+  preferences.putFloat("diff", configDifferential);
+  preferences.putInt("min_off", configMinOffSeconds);
+
+  installationStatus = "INSTALLING";
+  installationPhase = "pending_sensor_detection";
+  guardarEstadoInstalacionLocal();
+
+  JsonDocument respuesta;
+  respuesta["success"] = true;
+  respuesta["device_id"] = DEVICE_ID;
+  respuesta["operation_mode"] = configOperationMode;
+  respuesta["cooling_level"] = configCoolingLevel;
+  respuesta["setpoint"] = configSetpoint;
+  respuesta["differential"] = configDifferential;
+  respuesta["installation_status"] = installationStatus;
+  respuesta["installation_phase"] = installationPhase;
+  respuesta["installation_completed"] = installationCompleted;
+
+  String body;
+  serializeJson(respuesta, body);
+
+  servidorInstalacion.send(200, "application/json", body);
 }
 
 void iniciarModoInstalacionLocal()
@@ -2242,6 +2242,7 @@ void iniciarModoInstalacionLocal()
   servidorInstalacion.on("/api/wifi/status", HTTP_GET, responderWifiStatus);
   servidorInstalacion.on("/api/install/sensors", HTTP_GET, responderInstallSensors);
   servidorInstalacion.on("/api/install/sensors", HTTP_POST, responderGuardarInstallSensors);
+  servidorInstalacion.on("/api/install/operation-mode", HTTP_POST, responderGuardarOperationMode);
   servidorInstalacion.on("/api/factory-reset", HTTP_POST, responderFactoryReset);
 
   servidorInstalacion.begin();
@@ -2293,6 +2294,7 @@ void iniciarModoInstalacionLocalConWifiCliente()
   servidorInstalacion.on("/api/wifi/status", HTTP_GET, responderWifiStatus);
   servidorInstalacion.on("/api/install/sensors", HTTP_GET, responderInstallSensors);
   servidorInstalacion.on("/api/install/sensors", HTTP_POST, responderGuardarInstallSensors);
+  servidorInstalacion.on("/api/install/operation-mode", HTTP_POST, responderGuardarOperationMode);
   servidorInstalacion.on("/api/factory-reset", HTTP_POST, responderFactoryReset);
 
   servidorInstalacion.begin();
@@ -2323,6 +2325,26 @@ void setup()
 
   preferences.begin("smartcold", false);
   cargarEstadoInstalacionLocal();
+  Serial.println();
+  Serial.println("===== ESTADO INSTALACION =====");
+
+  Serial.print("Status: ");
+  Serial.println(installationStatus);
+
+  Serial.print("Session: ");
+  Serial.println(installationSessionId);
+
+  Serial.print("Installer: ");
+  Serial.println(installerUid);
+
+  Serial.print("Phase: ");
+  Serial.println(installationPhase);
+
+  Serial.print("Completed: ");
+  Serial.println(installationCompleted ? "SI" : "NO");
+
+  Serial.println("==============================");
+  Serial.println();
   pinMode(compressorOutputPin, OUTPUT);
   pinMode(PIN_RELAY_DEFROST, OUTPUT);
   pinMode(PIN_RELAY_FAN, OUTPUT);
@@ -2352,6 +2374,8 @@ void setup()
   configDifferential = preferences.getFloat("diff", 2.0);
   configMinOffSeconds = preferences.getInt("min_off", 180);
   configUpdatedAt = preferences.getString("cfg_time", "");
+  configOperationMode = preferences.getString("op_mode", "");
+  configCoolingLevel = preferences.getInt("cool_lvl", 4);
   configControlSensorRole = preferences.getString("ctrl_role", configControlSensorRole);
   sensorCamaraAddress = preferences.getString("cam_addr", sensorCamaraAddress);
   sensorEvaporadorAddress = preferences.getString("evap_addr", sensorEvaporadorAddress);
@@ -2365,11 +2389,15 @@ void setup()
 
   cargarSensoresConfiguradosDesdeMemoria();
 
-  if (!tieneConfiguracionOperativa())
+  if (installationCompleted && !tieneConfiguracionOperativa())
   {
-    Serial.println("⚙️ No hay configuracion operativa local valida.");
-    Serial.println("Se ignoran sensores/parametros viejos y el equipo queda en modo instalacion.");
-    borrarConfiguracionOperativaGuardada();
+    Serial.println("⚠️ Equipo marcado como comisionado, pero sin configuracion operativa valida.");
+    Serial.println("⚠️ Se desactiva comisionamiento y vuelve a modo instalacion.");
+
+    installationCompleted = false;
+    installationStatus = "NEW";
+    installationPhase = "pending_device";
+    guardarEstadoInstalacionLocal();
   }
 
   Serial.print("Sensor camara configurado: ");
@@ -2441,11 +2469,14 @@ void setup()
     Serial.print("RSSI: ");
     Serial.println(WiFi.RSSI());
 
-    descargarConfiguracion();
-
-    if (!tieneConfiguracionOperativa())
+    if (installationCompleted)
     {
-      Serial.println("⚙️ Equipo con WiFi, pero instalación pendiente. Activando AP local.");
+      descargarConfiguracion();
+    }
+    else
+    {
+      Serial.println("⚙️ Instalación pendiente.");
+      Serial.println("⚙️ No se descarga configuración del backend.");
       iniciarModoInstalacionLocalConWifiCliente();
     }
   }
@@ -2456,10 +2487,18 @@ void setup()
     iniciarModoInstalacionLocal();
   }
 
-  leerTemperaturasDS18B20();
-  evaluarAlarmasSensores();
-  calcularControlCompresorLocal();
-  enviarTelemetria();
+  if (installationCompleted)
+  {
+    leerTemperaturasDS18B20();
+    evaluarAlarmasSensores();
+    calcularControlCompresorLocal();
+    enviarTelemetria();
+  }
+  else
+  {
+    aplicarSalidaCompresor();
+    Serial.println("⚙️ Equipo en proceso de instalación.");
+  }
 }
 
 void verificarConexionWifi()
@@ -2484,9 +2523,9 @@ void loop()
   if (modoInstalacionLocalActivo)
   {
     servidorInstalacion.handleClient();
+
     static unsigned long ultimaLecturaInstalacion = 0;
-    static unsigned long ultimaTelemetriaInstalacion = 0;
-    static unsigned long ultimaConfigInstalacion = 0;
+
     if (wifiConfiguracionPendiente && millis() >= wifiProcesarDespuesDeMs)
     {
       wifiConfiguracionPendiente = false;
@@ -2501,10 +2540,13 @@ void loop()
       WiFi.mode(WIFI_AP_STA);
       delay(500);
 
-      WiFi.disconnect(false);
+      WiFi.disconnect(true, false);
+      delay(1000);
+
+      WiFi.mode(WIFI_AP_STA);
       delay(500);
 
-      WiFi.persistent(false);
+      WiFi.persistent(true);
       WiFi.begin(wifiPendienteSsid.c_str(), wifiPendientePassword.c_str());
 
       unsigned long inicioWifi = millis();
@@ -2520,42 +2562,21 @@ void loop()
 
       if (WiFi.status() == WL_CONNECTED)
       {
-        wifiEstado = "connected";
+        wifiEstado = "backend_verified";
         wifiUltimoError = "";
-        wifiBackendVerificado = false;
+        wifiBackendVerificado = true;
 
         Serial.println("✅ WIFI CONFIGURADO DESDE APP");
         Serial.print("IP STA: ");
         Serial.println(WiFi.localIP());
 
-        unsigned long inicioAvisoConectado = millis();
-
-        while (millis() - inicioAvisoConectado < 3000)
-        {
-          servidorInstalacion.handleClient();
-          delay(50);
-        }
-
-        wifiBackendVerificado = true;
-        wifiEstado = "backend_verified";
-
-        Serial.println("✅ WIFI Y BACKEND MARCADOS COMO VERIFICADOS PARA LA APP");
+        installationStatus = "INSTALLING";
         installationWifiConfigured = true;
         installationConnectionVerified = true;
         installationWifiSsid = WiFi.SSID();
         installationPhase = "pending_sensor_detection";
 
         guardarEstadoInstalacionLocal();
-        unsigned long inicioAvisoBackend = millis();
-
-        while (millis() - inicioAvisoBackend < 8000)
-        {
-          servidorInstalacion.handleClient();
-          delay(50);
-        }
-
-        ultimaTelemetriaInstalacion = millis();
-        ultimaConfigInstalacion = millis();
       }
       else
       {
@@ -2565,51 +2586,21 @@ void loop()
         wifiUltimoError = "WIFI_CONNECTION_FAILED";
         wifiBackendVerificado = false;
 
-        unsigned long inicioAvisoError = millis();
-
-        while (millis() - inicioAvisoError < 5000)
-        {
-          servidorInstalacion.handleClient();
-          delay(50);
-        }
-
         restaurarModoInstalacionLocal();
       }
     }
 
-    if (millis() - ultimaLecturaInstalacion >= 5000)
+    if (millis() - ultimaLecturaInstalacion >= 30000)
     {
       ultimaLecturaInstalacion = millis();
-      leerTemperaturasDS18B20();
       Serial.println("⚙️ Modo instalacion local activo. AP/API esperando app.");
-    }
-
-    if (WiFi.status() == WL_CONNECTED && !wifiConfiguracionPendiente)
-    {
-      if (millis() - ultimaTelemetriaInstalacion >= 30000)
-      {
-        ultimaTelemetriaInstalacion = millis();
-        enviarTelemetria();
-      }
-
-      if (
-          millis() - ultimaConfigInstalacion >= INTERVALO_CONFIG_MS &&
-          installationPhase != "pending_sensor_detection" &&
-          installationPhase != "sensors_setup" &&
-          installationPhase != "pending_initial_configuration")
-      {
-        ultimaConfigInstalacion = millis();
-        descargarConfiguracion();
-      }
     }
 
     delay(10);
     return;
   }
 
-  bool configurado = tieneConfiguracionOperativa();
-
-  if (!configurado)
+  if (!installationCompleted)
   {
     compressorRelayOn = false;
     compressorShouldBeOn = false;
@@ -2621,20 +2612,21 @@ void loop()
 
     aplicarSalidaCompresor();
 
-    Serial.println("⚙️ Instalacion pendiente. Control de refrigeracion deshabilitado.");
-  }
-  else
-  {
-    evaluarAlarmasSensores();
+    Serial.println("⚙️ Instalacion pendiente. Control, telemetria y backend deshabilitados.");
 
-    verificarInicioDefrost();
-    verificarFinDefrost();
-    verificarFinGoteo();
-
-    actualizarTemperaturaPrueba();
-    calcularControlCompresorLocal();
-    actualizarTiempoCompresorParaDefrost();
+    delay(10000);
+    return;
   }
+
+  evaluarAlarmasSensores();
+
+  verificarInicioDefrost();
+  verificarFinDefrost();
+  verificarFinGoteo();
+
+  actualizarTemperaturaPrueba();
+  calcularControlCompresorLocal();
+  actualizarTiempoCompresorParaDefrost();
 
   verificarConexionWifi();
 
