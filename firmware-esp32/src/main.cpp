@@ -233,6 +233,8 @@ void cargarEstadoInstalacionLocal()
 }
 void descargarConfiguracion();
 String nombreSensorPorRole(String role);
+void actualizarSensoresDetectados();
+int buscarSensorConfiguradoPorAddress(String address);
 
 String obtenerEstadoOperativo()
 {
@@ -261,6 +263,16 @@ String obtenerMotivoBloqueoCompresor()
 
   if (dripActive)
     return "DRIP";
+
+  for (int i = 0; i < cantidadSensoresConfigurados; i++)
+  {
+    if (sensoresConfigurados[i].enabled &&
+        sensoresConfigurados[i].canStopCompressor &&
+        sensoresConfigurados[i].inAlarm)
+    {
+      return "SENSOR_PROTECTION";
+    }
+  }
 
   if (localProtectionActive)
     return "PROTECTION";
@@ -885,6 +897,32 @@ void evaluarAlarmasSensores()
   }
 }
 
+bool existeSensorBloqueandoCompresor()
+{
+  for (int i = 0; i < cantidadSensoresConfigurados; i++)
+  {
+    SensorConfigurado &sensor = sensoresConfigurados[i];
+
+    if (!sensor.enabled)
+      continue;
+
+    if (!sensor.canStopCompressor)
+      continue;
+
+    if (!sensor.inAlarm)
+      continue;
+
+    Serial.print("🛑 Compresor bloqueado por sensor: ");
+    Serial.print(sensor.role);
+    Serial.print(" | ");
+    Serial.println(sensor.alarmReason);
+
+    return true;
+  }
+
+  return false;
+}
+
 void aplicarSalidaCompresor()
 {
   digitalWrite(compressorOutputPin, compressorRelayOn ? HIGH : LOW);
@@ -1043,7 +1081,12 @@ void calcularControlCompresorLocal()
 
   compressorCanTurnOn = true;
   localProtectionWaitSecondsRemaining = 0;
+  bool sensorProtectionActive = existeSensorBloqueandoCompresor();
 
+  if (sensorProtectionActive)
+  {
+    compressorCanTurnOn = false;
+  }
   if (localProtectionActive)
   {
     unsigned long tiempoApagado = millis() - localProtectionStartMillis;
@@ -1066,7 +1109,7 @@ void calcularControlCompresorLocal()
     }
   }
 
-  if (defrostActive || dripActive)
+  if (defrostActive || dripActive || sensorProtectionActive)
   {
     compressorCanTurnOn = false;
     compressorRelayOn = false;
@@ -1322,52 +1365,39 @@ String direccionSensorToString(DeviceAddress direccion)
 
 void leerTemperaturasDS18B20()
 {
-  sensoresDS18B20.requestTemperatures();
-
-  int cantidadSensores = sensoresDS18B20.getDeviceCount();
-  cantidadSensoresDetectados = 0;
+  actualizarSensoresDetectados();
 
   Serial.println();
   Serial.println("🌡️ LECTURA TEMPERATURAS DS18B20");
+  Serial.print("Sensores detectados guardados: ");
+  Serial.println(cantidadSensoresDetectados);
 
-  DeviceAddress direccion;
-
-  for (int i = 0; i < cantidadSensores; i++)
+  for (int i = 0; i < cantidadSensoresDetectados; i++)
   {
-    if (sensoresDS18B20.getAddress(direccion, i))
-    {
-      float tempC = sensoresDS18B20.getTempC(direccion);
+    String direccionTexto = sensoresDetectados[i];
 
-      Serial.print("Sensor ");
-      Serial.print(i + 1);
-      Serial.print(" ");
-      imprimirDireccionSensor(direccion);
+    Serial.print("Sensor ");
+    Serial.print(i + 1);
+    Serial.print(" ");
+    Serial.print(direccionTexto);
+
+    int configuredIndex = buscarSensorConfiguradoPorAddress(direccionTexto);
+
+    if (configuredIndex >= 0 && sensoresConfigurados[configuredIndex].hasReading)
+    {
       Serial.print(" = ");
-      Serial.print(tempC);
+      Serial.print(sensoresConfigurados[configuredIndex].temperature);
       Serial.println(" °C");
 
-      String direccionTexto = direccionSensorToString(direccion);
-
-      if (cantidadSensoresDetectados < MAX_SENSORES_DS18B20)
-      {
-        sensoresDetectados[cantidadSensoresDetectados] = direccionTexto;
-        cantidadSensoresDetectados++;
-      }
-
-      for (int j = 0; j < cantidadSensoresConfigurados; j++)
-      {
-        if (direccionTexto == sensoresConfigurados[j].address && tempC != DEVICE_DISCONNECTED_C)
-        {
-          sensoresConfigurados[j].temperature = tempC;
-          sensoresConfigurados[j].hasReading = true;
-
-          Serial.print("✅ Sensor por rol actualizado: ");
-          Serial.print(sensoresConfigurados[j].role);
-          Serial.print(" = ");
-          Serial.print(tempC);
-          Serial.println(" °C");
-        }
-      }
+      Serial.print("✅ Sensor por rol actualizado: ");
+      Serial.print(sensoresConfigurados[configuredIndex].role);
+      Serial.print(" = ");
+      Serial.print(sensoresConfigurados[configuredIndex].temperature);
+      Serial.println(" °C");
+    }
+    else
+    {
+      Serial.println(" detectado sin rol configurado o sin lectura valida.");
     }
   }
 }
@@ -1606,32 +1636,24 @@ int buscarSensorConfiguradoPorAddress(String address)
   return -1;
 }
 
-void responderInstallSensors()
+void actualizarSensoresDetectados()
 {
+  cantidadSensoresDetectados = 0;
+
+  for (int i = 0; i < cantidadSensoresConfigurados; i++)
+  {
+    sensoresConfigurados[i].temperature = NAN;
+    sensoresConfigurados[i].hasReading = false;
+  }
+
   sensoresDS18B20.begin();
   sensoresDS18B20.requestTemperatures();
 
   int cantidadFisica = sensoresDS18B20.getDeviceCount();
-  int cantidadReportada = 0;
 
-  JsonDocument doc;
-
-  doc["success"] = true;
-  doc["device_id"] = DEVICE_ID;
-  doc["hardware_uid"] = HARDWARE_UID;
-  doc["firmware_version"] = FIRMWARE_VERSION;
-  doc["installation_phase"] = installationPhase;
-  doc["installation_completed"] = installationCompleted;
-  doc["installation_status"] = installationStatus;
-  doc["max_ds18b20_sensors"] = MAX_SENSORES_DS18B20;
-  doc["configured_count"] = cantidadSensoresConfigurados;
-
-  JsonArray sensores = doc["sensors"].to<JsonArray>();
   DeviceAddress direccion;
 
-  cantidadSensoresDetectados = 0;
-
-  for (int i = 0; i < cantidadFisica && cantidadReportada < MAX_SENSORES_DS18B20; i++)
+  for (int i = 0; i < cantidadFisica && cantidadSensoresDetectados < MAX_SENSORES_DS18B20; i++)
   {
     if (!sensoresDS18B20.getAddress(direccion, i))
     {
@@ -1646,18 +1668,55 @@ void responderInstallSensors()
     cantidadSensoresDetectados++;
 
     int configuredIndex = buscarSensorConfiguradoPorAddress(address);
+
+    if (configuredIndex >= 0)
+    {
+      sensoresConfigurados[configuredIndex].temperature =
+          hasReading ? tempC + sensoresConfigurados[configuredIndex].offset : NAN;
+
+      sensoresConfigurados[configuredIndex].hasReading = hasReading;
+    }
+  }
+}
+
+void responderInstallSensors()
+{
+  actualizarSensoresDetectados();
+
+  JsonDocument doc;
+
+  doc["success"] = true;
+  doc["device_id"] = DEVICE_ID;
+  doc["hardware_uid"] = HARDWARE_UID;
+  doc["firmware_version"] = FIRMWARE_VERSION;
+  doc["installation_phase"] = installationPhase;
+  doc["installation_completed"] = installationCompleted;
+  doc["installation_status"] = installationStatus;
+  doc["max_ds18b20_sensors"] = MAX_SENSORES_DS18B20;
+  doc["configured_count"] = cantidadSensoresConfigurados;
+
+  JsonArray sensores = doc["sensors"].to<JsonArray>();
+
+  for (int i = 0; i < cantidadSensoresDetectados; i++)
+  {
+    String address = sensoresDetectados[i];
+
+    int configuredIndex = buscarSensorConfiguradoPorAddress(address);
     bool configured = configuredIndex >= 0;
 
     JsonObject sensor = sensores.add<JsonObject>();
-    sensor["index"] = cantidadReportada + 1;
+    sensor["index"] = i + 1;
     sensor["type"] = "ds18b20";
     sensor["address"] = address;
-    sensor["temperature"] = hasReading ? tempC : 0;
-    sensor["has_reading"] = hasReading;
     sensor["configured"] = configured;
 
     if (configured)
     {
+      sensor["temperature"] = sensoresConfigurados[configuredIndex].hasReading
+                                  ? sensoresConfigurados[configuredIndex].temperature
+                                  : 0;
+
+      sensor["has_reading"] = sensoresConfigurados[configuredIndex].hasReading;
       sensor["id"] = sensoresConfigurados[configuredIndex].id;
       sensor["role"] = sensoresConfigurados[configuredIndex].role;
       sensor["name"] = sensoresConfigurados[configuredIndex].name;
@@ -1670,6 +1729,8 @@ void responderInstallSensors()
     }
     else
     {
+      sensor["temperature"] = 0;
+      sensor["has_reading"] = true;
       sensor["id"] = "";
       sensor["role"] = "";
       sensor["name"] = "Sin asignar";
@@ -1680,19 +1741,19 @@ void responderInstallSensors()
       sensor["temp_max_alarm"] = 0;
       sensor["can_stop_compressor"] = false;
     }
-
-    cantidadReportada++;
   }
 
-  installationSensorsDetected = cantidadReportada > 0;
+  installationSensorsDetected = cantidadSensoresDetectados > 0;
+
   if (installationSensorsDetected &&
       (installationPhase == "pending_sensor_detection" || installationPhase == "wifi_setup"))
   {
     installationPhase = "sensors_setup";
   }
+
   guardarEstadoInstalacionLocal();
 
-  doc["detected_count"] = cantidadReportada;
+  doc["detected_count"] = cantidadSensoresDetectados;
   doc["sensors_detected"] = installationSensorsDetected;
   doc["sensors_assigned"] = installationSensorsAssigned;
 
@@ -1709,22 +1770,8 @@ void responderGuardarInstallSensors()
     servidorInstalacion.send(405, "application/json", "{\"success\":false,\"error\":\"METHOD_NOT_ALLOWED\"}");
     return;
   }
-
   // Refresca la lista física antes de validar direcciones.
-  sensoresDS18B20.begin();
-  int cantidadFisica = sensoresDS18B20.getDeviceCount();
-  cantidadSensoresDetectados = 0;
-
-  DeviceAddress direccion;
-  for (int i = 0; i < cantidadFisica && cantidadSensoresDetectados < MAX_SENSORES_DS18B20; i++)
-  {
-    if (sensoresDS18B20.getAddress(direccion, i))
-    {
-      sensoresDetectados[cantidadSensoresDetectados] = direccionSensorToString(direccion);
-      cantidadSensoresDetectados++;
-    }
-  }
-
+  actualizarSensoresDetectados();
   JsonDocument doc;
   DeserializationError error = deserializeJson(doc, servidorInstalacion.arg("plain"));
 
@@ -1930,6 +1977,28 @@ void responderDeviceInfo()
   doc["sensors_assigned"] = installationSensorsAssigned;
   doc["operation_mode"] = configOperationMode;
   doc["cooling_level"] = configCoolingLevel;
+  bool parametersConfigured =
+      installationPhase == "pending_finish" ||
+      installationPhase == "completed" ||
+      installationCompleted;
+
+  doc["parameters_configured"] = parametersConfigured;
+  doc["setpoint"] = configSetpoint;
+  doc["differential"] = configDifferential;
+  doc["min_off_seconds"] = configMinOffSeconds;
+  doc["control_sensor_role"] = configControlSensorRole;
+  doc["defrost_enabled"] = configDefrostEnabled;
+  doc["defrost_active"] = defrostActive;
+  doc["defrost_interval_minutes"] = configDefrostIntervalMinutes;
+  doc["defrost_duration_minutes"] = configDefrostDurationMinutes;
+  doc["defrost_end_sensor_role"] = configDefrostEndSensorRole;
+  doc["defrost_end_temperature"] = configDefrostEndTemperature;
+  doc["defrost_remaining_seconds"] = 0;
+  doc["defrost_next_seconds"] = 0;
+
+  doc["drip_active"] = dripActive;
+  doc["drip_time_seconds"] = configDripTimeSeconds;
+  doc["drip_remaining_seconds"] = 0;
   doc["local_installation_mode"] = modoInstalacionLocalActivo;
   doc["wifi_status"] = wifiEstado;
   doc["wifi_error"] = wifiUltimoError;
@@ -1945,6 +2014,23 @@ void responderDeviceInfo()
     detectedSensors.add(sensoresDetectados[i]);
   }
 
+  JsonArray configuredSensors = doc["configured_sensors"].to<JsonArray>();
+
+  for (int i = 0; i < cantidadSensoresConfigurados; i++)
+  {
+    JsonObject sensor = configuredSensors.add<JsonObject>();
+
+    sensor["role"] = sensoresConfigurados[i].role;
+    sensor["name"] = sensoresConfigurados[i].name;
+    sensor["address"] = sensoresConfigurados[i].address;
+    sensor["enabled"] = sensoresConfigurados[i].enabled;
+    sensor["temperature"] = sensoresConfigurados[i].temperature;
+    sensor["has_reading"] = sensoresConfigurados[i].hasReading;
+    sensor["alarm_enabled"] = sensoresConfigurados[i].alarmEnabled;
+    sensor["temp_min_alarm"] = sensoresConfigurados[i].tempMinAlarm;
+    sensor["temp_max_alarm"] = sensoresConfigurados[i].tempMaxAlarm;
+    sensor["can_stop_compressor"] = sensoresConfigurados[i].canStopCompressor;
+  }
   String respuesta;
   serializeJson(doc, respuesta);
 
@@ -2197,6 +2283,110 @@ void responderGuardarOperationMode()
   servidorInstalacion.send(200, "application/json", body);
 }
 
+void responderGuardarInitialConfig()
+{
+  Serial.println();
+  Serial.println("⚙️ RECIBIENDO CONFIGURACION INICIAL...");
+  Serial.println(servidorInstalacion.arg("plain"));
+  if (servidorInstalacion.method() != HTTP_POST)
+  {
+    servidorInstalacion.send(405, "application/json", "{\"success\":false,\"error\":\"METHOD_NOT_ALLOWED\"}");
+    return;
+  }
+
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, servidorInstalacion.arg("plain"));
+
+  if (error)
+  {
+    servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"INVALID_JSON\"}");
+    return;
+  }
+
+  String operationMode = doc["operation_mode"] | configOperationMode;
+  operationMode.toLowerCase();
+
+  if (operationMode != "refrigerate" && operationMode != "freeze")
+  {
+    servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"INVALID_OPERATION_MODE\"}");
+    return;
+  }
+
+  int coolingLevel = doc["cooling_level"] | configCoolingLevel;
+
+  if (coolingLevel < 1 || coolingLevel > 7)
+  {
+    servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"INVALID_COOLING_LEVEL\"}");
+    return;
+  }
+
+  float setpoint = doc["setpoint"] | configSetpoint;
+  float differential = doc["differential"] | configDifferential;
+  int minOffSeconds = doc["min_off_seconds"] | configMinOffSeconds;
+
+  float tempMinAlarm = doc["temp_min_alarm"] | -100.0;
+  float tempMaxAlarm = doc["temp_max_alarm"] | 100.0;
+
+  configOperationMode = operationMode;
+  configCoolingLevel = coolingLevel;
+  configSetpoint = setpoint;
+  configDifferential = differential;
+  configMinOffSeconds = minOffSeconds;
+  configControlSensorRole = "chamber";
+
+  preferences.putString("op_mode", configOperationMode);
+  preferences.putInt("cool_lvl", configCoolingLevel);
+  preferences.putFloat("setpoint", configSetpoint);
+  preferences.putFloat("diff", configDifferential);
+  preferences.putInt("min_off", configMinOffSeconds);
+  preferences.putString("ctrl_role", configControlSensorRole);
+
+  for (int i = 0; i < cantidadSensoresConfigurados; i++)
+  {
+    if (sensoresConfigurados[i].role == "chamber")
+    {
+      sensoresConfigurados[i].alarmEnabled = true;
+      sensoresConfigurados[i].tempMinAlarm = tempMinAlarm;
+      sensoresConfigurados[i].tempMaxAlarm = tempMaxAlarm;
+      sensoresConfigurados[i].canStopCompressor = true;
+    }
+  }
+
+  guardarSensoresConfiguradosEnMemoria();
+
+  installationPhase = "pending_finish";
+  guardarEstadoInstalacionLocal();
+  Serial.println("✅ CONFIGURACION INICIAL GUARDADA.");
+  Serial.print("Operation mode: ");
+  Serial.println(configOperationMode);
+  Serial.print("Cooling level: ");
+  Serial.println(configCoolingLevel);
+  Serial.print("Setpoint: ");
+  Serial.println(configSetpoint);
+  Serial.print("Differential: ");
+  Serial.println(configDifferential);
+  Serial.print("Installation phase: ");
+  Serial.println(installationPhase);
+  JsonDocument respuesta;
+  respuesta["success"] = true;
+  respuesta["device_id"] = DEVICE_ID;
+  respuesta["operation_mode"] = configOperationMode;
+  respuesta["cooling_level"] = configCoolingLevel;
+  respuesta["setpoint"] = configSetpoint;
+  respuesta["differential"] = configDifferential;
+  respuesta["min_off_seconds"] = configMinOffSeconds;
+  respuesta["control_sensor_role"] = configControlSensorRole;
+  respuesta["temp_min_alarm"] = tempMinAlarm;
+  respuesta["temp_max_alarm"] = tempMaxAlarm;
+  respuesta["installation_phase"] = installationPhase;
+  respuesta["parameters_configured"] = true;
+
+  String body;
+  serializeJson(respuesta, body);
+
+  servidorInstalacion.send(200, "application/json", body);
+}
+
 void iniciarModoInstalacionLocal()
 {
   String nombreAP = DEVICE_ID;
@@ -2243,6 +2433,7 @@ void iniciarModoInstalacionLocal()
   servidorInstalacion.on("/api/install/sensors", HTTP_GET, responderInstallSensors);
   servidorInstalacion.on("/api/install/sensors", HTTP_POST, responderGuardarInstallSensors);
   servidorInstalacion.on("/api/install/operation-mode", HTTP_POST, responderGuardarOperationMode);
+  servidorInstalacion.on("/api/install/initial-config", HTTP_POST, responderGuardarInitialConfig);
   servidorInstalacion.on("/api/factory-reset", HTTP_POST, responderFactoryReset);
 
   servidorInstalacion.begin();
@@ -2295,6 +2486,7 @@ void iniciarModoInstalacionLocalConWifiCliente()
   servidorInstalacion.on("/api/install/sensors", HTTP_GET, responderInstallSensors);
   servidorInstalacion.on("/api/install/sensors", HTTP_POST, responderGuardarInstallSensors);
   servidorInstalacion.on("/api/install/operation-mode", HTTP_POST, responderGuardarOperationMode);
+  servidorInstalacion.on("/api/install/initial-config", HTTP_POST, responderGuardarInitialConfig);
   servidorInstalacion.on("/api/factory-reset", HTTP_POST, responderFactoryReset);
 
   servidorInstalacion.begin();
@@ -2618,6 +2810,7 @@ void loop()
     return;
   }
 
+  leerTemperaturasDS18B20();
   evaluarAlarmasSensores();
 
   verificarInicioDefrost();

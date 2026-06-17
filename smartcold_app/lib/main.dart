@@ -1801,44 +1801,85 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
                           },
                         ),
 
-                        const SizedBox(height: 12),
+                        if (data['defrost_enabled'] == true ||
+                            ((int.tryParse(
+                                      data['drip_time_seconds']?.toString() ??
+                                          '',
+                                    ) ??
+                                    0) >
+                                0)) ...[
+                          const SizedBox(height: 12),
 
-                        LayoutBuilder(
-                          builder: (context, constraints) {
-                            final defrostCard = _DefrostCard(
-                              active: data['defrost_active'],
-                              evaporatorTemp: evaporatorTemp,
-                              chamberTemp: chamberTemp,
-                              endTemperature: data['defrost_end_temperature'],
-                              remainingSeconds:
-                                  data['defrost_remaining_seconds'],
-                              nextSeconds: data['defrost_next_seconds'],
-                              durationMinutes: data['defrost_duration_minutes'],
-                              intervalMinutes: data['defrost_interval_minutes'],
-                              connectionStatus: connectionStatus,
-                              secondsSinceLastSeen: secondsSinceLastSeen,
-                            );
+                          LayoutBuilder(
+                            builder: (context, constraints) {
+                              final defrostEnabled =
+                                  data['defrost_enabled'] == true;
 
-                            final dripCard = _DripCard(
-                              active: data['drip_active'],
-                              configuredSeconds: data['drip_time_seconds'],
-                              remainingSeconds: data['drip_remaining_seconds'],
-                              connectionStatus: connectionStatus,
-                              secondsSinceLastSeen: secondsSinceLastSeen,
-                            );
+                              final dripEnabled =
+                                  (int.tryParse(
+                                        data['drip_time_seconds']?.toString() ??
+                                            '',
+                                      ) ??
+                                      0) >
+                                  0;
 
-                            return IntrinsicHeight(
-                              child: Row(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: [
-                                  Expanded(child: defrostCard),
-                                  const SizedBox(width: 8),
-                                  Expanded(child: dripCard),
-                                ],
-                              ),
-                            );
-                          },
-                        ),
+                              final cards = <Widget>[];
+
+                              if (defrostEnabled) {
+                                cards.add(
+                                  Expanded(
+                                    child: _DefrostCard(
+                                      active: data['defrost_active'],
+                                      evaporatorTemp: evaporatorTemp,
+                                      chamberTemp: chamberTemp,
+                                      endTemperature:
+                                          data['defrost_end_temperature'],
+                                      remainingSeconds:
+                                          data['defrost_remaining_seconds'],
+                                      nextSeconds: data['defrost_next_seconds'],
+                                      durationMinutes:
+                                          data['defrost_duration_minutes'],
+                                      intervalMinutes:
+                                          data['defrost_interval_minutes'],
+                                      connectionStatus: connectionStatus,
+                                      secondsSinceLastSeen:
+                                          secondsSinceLastSeen,
+                                    ),
+                                  ),
+                                );
+                              }
+
+                              if (defrostEnabled && dripEnabled) {
+                                cards.add(const SizedBox(width: 8));
+                              }
+
+                              if (dripEnabled) {
+                                cards.add(
+                                  Expanded(
+                                    child: _DripCard(
+                                      active: data['drip_active'],
+                                      configuredSeconds:
+                                          data['drip_time_seconds'],
+                                      remainingSeconds:
+                                          data['drip_remaining_seconds'],
+                                      connectionStatus: connectionStatus,
+                                      secondsSinceLastSeen:
+                                          secondsSinceLastSeen,
+                                    ),
+                                  ),
+                                );
+                              }
+
+                              return IntrinsicHeight(
+                                child: Row(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  children: cards,
+                                ),
+                              );
+                            },
+                          ),
+                        ],
                       ],
                     ),
                   ),
@@ -2610,7 +2651,7 @@ class _KpiCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final textValue = _formatNumber(value);
-    final inAlarm = badgeText != 'NORMAL';
+    final inAlarm = badgeText != 'NORMAL' && badgeText != 'PROTEGE';
     final cardAccent = inAlarm ? Colors.redAccent : accent;
 
     return LayoutBuilder(
@@ -4110,6 +4151,7 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
   bool _loading = false;
   String? _error;
   Map<String, dynamic>? _deviceInfo;
+  Map<String, dynamic>? _initialConfiguration;
   List<ProgressStepData> _progressSteps = [];
 
   void _showProgressDialog(String title, List<String> steps) {
@@ -4173,6 +4215,16 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
 
       setState(() {
         _deviceInfo = Map<String, dynamic>.from(data);
+
+        if (data['parameters_configured'] == true) {
+          _initialConfiguration = {
+            'operation_mode': data['operation_mode'],
+            'cooling_level': data['cooling_level'],
+            'setpoint': data['setpoint'],
+            'differential': data['differential'],
+            'min_off_seconds': data['min_off_seconds'],
+          };
+        }
       });
     } catch (e) {
       if (!mounted) return;
@@ -4398,6 +4450,94 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
     }
   }
 
+  Future<void> _configureInitialParameters() async {
+    final operationMode = _deviceInfo?['operation_mode']?.toString();
+
+    if (operationMode != 'freeze' && operationMode != 'refrigerate') {
+      setState(() {
+        _error = 'Primero selecciona el tipo de equipo.';
+      });
+      return;
+    }
+
+    final result = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF020B14),
+      builder: (context) {
+        return _InitialConfigurationSheet(
+          operationMode: operationMode!,
+          initialCoolingLevel:
+              (_initialConfiguration?['cooling_level'] as int?) ?? 4,
+        );
+      },
+    );
+
+    if (result == null) return;
+
+    await _sendInitialConfiguration(result);
+  }
+
+  void _openInstallationTests() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => InstallationTestsPage(
+          deviceInfo: _deviceInfo ?? {},
+          initialConfiguration: _initialConfiguration ?? {},
+        ),
+      ),
+    );
+  }
+
+  Future<void> _sendInitialConfiguration(Map<String, dynamic> config) async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+
+    try {
+      final response = await http
+          .post(
+            Uri.parse('$_espBaseUrl/api/install/initial-config'),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode(config),
+          )
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode != 200) {
+        throw Exception('HTTP ${response.statusCode}: ${response.body}');
+      }
+
+      final data = jsonDecode(response.body);
+
+      if (data['success'] != true) {
+        throw Exception(data['error'] ?? 'No se pudo guardar configuración');
+      }
+
+      await _loadDeviceInfo();
+
+      if (!mounted) return;
+
+      setState(() {
+        _initialConfiguration = config;
+        _error = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _error = 'Error guardando configuración inicial: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+        });
+      }
+    }
+  }
+
   Future<void> _saveOperationMode(String operationMode) async {
     setState(() {
       _loading = true;
@@ -4567,6 +4707,419 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
                 ? null
                 : _detectAndAssignSensors,
           ),
+          _InstallationActionCard(
+            number: 5,
+            title: 'Configuración inicial',
+            subtitle: _initialConfiguration == null
+                ? 'Configurar nivel de frío, setpoint, diferencial y alarmas.'
+                : 'Nivel ${_initialConfiguration?['cooling_level']} · Setpoint ${(_initialConfiguration?['setpoint'] as num).toStringAsFixed(1)} °C',
+            completed: _initialConfiguration != null,
+            buttonText: _initialConfiguration == null
+                ? 'Configurar parámetros'
+                : 'Cambiar parámetros',
+            onPressed:
+                _deviceInfo == null ||
+                    _loading ||
+                    _deviceInfo?['sensors_assigned'] != true
+                ? null
+                : _configureInitialParameters,
+          ),
+          _InstallationActionCard(
+            number: 6,
+            title: 'Pruebas del equipo',
+            subtitle:
+                'Verificar lecturas, configuración y vista previa del cliente.',
+            completed: false,
+            buttonText: 'Abrir pruebas',
+            onPressed:
+                _deviceInfo == null ||
+                    _loading ||
+                    _deviceInfo?['sensors_assigned'] != true
+                ? null
+                : _openInstallationTests,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class SmartColdMonitorView extends StatelessWidget {
+  const SmartColdMonitorView({
+    super.key,
+    required this.data,
+    required this.technicianMode,
+  });
+
+  final Map<String, dynamic> data;
+  final bool technicianMode;
+
+  @override
+  Widget build(BuildContext context) {
+    final deviceName =
+        data['device_name'] ?? data['name'] ?? data['device_id'] ?? 'SmartCold';
+
+    final coolingLevel =
+        int.tryParse(data['cooling_level']?.toString() ?? '') ?? 4;
+    final setpoint = double.tryParse(data['setpoint']?.toString() ?? '') ?? 0.0;
+    final differential =
+        double.tryParse(data['differential']?.toString() ?? '') ?? 0.0;
+
+    final configuredSensorsRaw = data['configured_sensors'];
+    final configuredSensors = configuredSensorsRaw is List
+        ? configuredSensorsRaw
+              .whereType<Map>()
+              .map((item) => Map<String, dynamic>.from(item))
+              .toList()
+        : <Map<String, dynamic>>[];
+
+    final defrostEnabled = data['defrost_enabled'] == true;
+    final dripEnabled =
+        defrostEnabled &&
+        ((int.tryParse(data['drip_time_seconds']?.toString() ?? '') ?? 0) > 0);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _HeroPanel(
+          deviceName: deviceName,
+          health: data['device_health'],
+          healthReason: data['device_health_reason'],
+          state: data['device_state'] ?? 'SETUP',
+          online: true,
+          rssi: data['rssi'],
+          compressorOn: data['compressor_relay_on'],
+          blockReason: data['compressor_block_reason'],
+        ),
+
+        const SizedBox(height: 8),
+
+        _CoolingLevelDial(
+          level: coolingLevel,
+          setpoint: setpoint,
+          turnOnTemp: setpoint + differential,
+          turnOffTemp: setpoint,
+          unlocked: false,
+          onUnlockChanged: (_) {},
+          onLevelChanged: (_) {},
+        ),
+
+        const SizedBox(height: 18),
+
+        MonitorDynamicGrid(
+          sensors: configuredSensors,
+          data: data,
+          technicianMode: technicianMode,
+        ),
+        if (defrostEnabled || dripEnabled) ...[
+          const SizedBox(height: 12),
+
+          IntrinsicHeight(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (defrostEnabled)
+                  Expanded(
+                    child: _DefrostCard(
+                      active: data['defrost_active'],
+                      evaporatorTemp: null,
+                      chamberTemp: null,
+                      endTemperature: data['defrost_end_temperature'],
+                      remainingSeconds: data['defrost_remaining_seconds'],
+                      nextSeconds: data['defrost_next_seconds'],
+                      durationMinutes: data['defrost_duration_minutes'],
+                      intervalMinutes: data['defrost_interval_minutes'],
+                      connectionStatus: 'online',
+                      secondsSinceLastSeen: 0,
+                    ),
+                  ),
+
+                if (defrostEnabled && dripEnabled) const SizedBox(width: 8),
+
+                if (dripEnabled)
+                  Expanded(
+                    child: _DripCard(
+                      active: data['drip_active'],
+                      configuredSeconds: data['drip_time_seconds'],
+                      remainingSeconds: data['drip_remaining_seconds'],
+                      connectionStatus: 'online',
+                      secondsSinceLastSeen: 0,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
+
+        if (technicianMode) ...[
+          const SizedBox(height: 18),
+          Card(
+            color: const Color(0xFF061A2E),
+            child: ListTile(
+              leading: const Icon(
+                Icons.engineering_rounded,
+                color: Color(0xFF00A8FF),
+              ),
+              title: const Text(
+                'Modo técnico',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              subtitle: const Text(
+                'Aquí agregaremos pruebas de salidas, sensores y diagnóstico.',
+                style: TextStyle(color: Color(0xFF9DB0C1)),
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class MonitorDynamicGrid extends StatelessWidget {
+  const MonitorDynamicGrid({
+    super.key,
+    required this.sensors,
+    required this.data,
+    required this.technicianMode,
+  });
+
+  final List<Map<String, dynamic>> sensors;
+  final Map<String, dynamic> data;
+  final bool technicianMode;
+
+  Widget _sensorCard(Map<String, dynamic> sensor) {
+    final name = sensor['name']?.toString() ?? 'Sensor';
+    final hasReading = sensor['has_reading'] == true;
+    final temperature = hasReading ? sensor['temperature'] : null;
+
+    final alarmEnabled = sensor['alarm_enabled'] == true;
+    final canStopCompressor = sensor['can_stop_compressor'] == true;
+    final tempMin = double.tryParse(sensor['temp_min_alarm']?.toString() ?? '');
+    final tempMax = double.tryParse(sensor['temp_max_alarm']?.toString() ?? '');
+    final tempValue = double.tryParse(temperature?.toString() ?? '');
+
+    bool inAlarm = false;
+    String badge = hasReading ? 'NORMAL' : 'SIN LECTURA';
+
+    if (canStopCompressor && hasReading) {
+      badge = technicianMode ? 'PROTEGE' : 'NORMAL';
+    }
+
+    if (hasReading && alarmEnabled && tempValue != null) {
+      if (tempMax != null && tempValue > tempMax) {
+        inAlarm = true;
+        badge = canStopCompressor
+            ? (technicianMode ? 'BLOQUEO ALTA' : 'PROTECCIÓN')
+            : (technicianMode ? 'ALTA' : 'ALERTA');
+      } else if (tempMin != null && tempValue < tempMin) {
+        inAlarm = true;
+        badge = canStopCompressor
+            ? (technicianMode ? 'BLOQUEO BAJA' : 'PROTECCIÓN')
+            : (technicianMode ? 'BAJA' : 'ALERTA');
+      }
+    }
+
+    return _KpiCard(
+      title: name,
+      value: temperature,
+      suffix: '°C',
+      icon: Icons.thermostat_rounded,
+      badgeText: badge,
+      accent: inAlarm ? Colors.redAccent : const Color(0xFF1EA7FF),
+    );
+  }
+
+  Widget _compressorCard() {
+    return _MiniCompressorKpi(
+      relayOn: data['compressor_relay_on'],
+      shouldBeOn: data['compressor_should_be_on'],
+      protectionSeconds: data['compressor_wait_seconds_remaining'],
+      connectionStatus: 'online',
+      secondsSinceLastSeen: 0,
+    );
+  }
+
+  Widget _row(List<Widget> children) {
+    return SizedBox(
+      height: 132,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (int i = 0; i < children.length; i++) ...[
+            Expanded(child: children[i]),
+            if (i < children.length - 1) const SizedBox(width: 8),
+          ],
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final orderedSensors = [...sensors];
+
+    orderedSensors.sort((a, b) {
+      final ar = a['role']?.toString() ?? '';
+      final br = b['role']?.toString() ?? '';
+
+      int weight(String role) {
+        if (role == 'chamber') return 0;
+        if (role == 'evaporator') return 1;
+        return 2;
+      }
+
+      return weight(ar).compareTo(weight(br));
+    });
+
+    final sensorCards = orderedSensors.map(_sensorCard).toList();
+    final compressor = _compressorCard();
+
+    final rows = <Widget>[];
+
+    if (sensorCards.isEmpty) {
+      rows.add(_row([compressor]));
+    } else if (sensorCards.length == 1) {
+      rows.add(_row([sensorCards[0], compressor]));
+    } else if (sensorCards.length == 2) {
+      rows.add(_row([sensorCards[0], sensorCards[1], compressor]));
+    } else if (sensorCards.length == 3) {
+      rows.add(_row([sensorCards[0], compressor]));
+      rows.add(_row([sensorCards[1], sensorCards[2]]));
+    } else {
+      rows.add(_row([sensorCards[0], sensorCards[1], compressor]));
+
+      for (int i = 2; i < sensorCards.length; i += 2) {
+        final remaining = sensorCards.skip(i).take(2).toList();
+        rows.add(_row(remaining));
+      }
+    }
+
+    return Column(
+      children: [
+        for (int i = 0; i < rows.length; i++) ...[
+          rows[i],
+          if (i < rows.length - 1) const SizedBox(height: 8),
+        ],
+      ],
+    );
+  }
+}
+
+class InstallationTestsPage extends StatefulWidget {
+  const InstallationTestsPage({
+    super.key,
+    required this.deviceInfo,
+    required this.initialConfiguration,
+  });
+
+  final Map<String, dynamic> deviceInfo;
+  final Map<String, dynamic> initialConfiguration;
+
+  @override
+  State<InstallationTestsPage> createState() => _InstallationTestsPageState();
+}
+
+class _InstallationTestsPageState extends State<InstallationTestsPage> {
+  static const String _espBaseUrl = 'http://192.168.4.1';
+
+  bool _loading = false;
+  Timer? _refreshTimer;
+  String? _error;
+  Map<String, dynamic> _deviceInfo = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _deviceInfo = Map<String, dynamic>.from(widget.deviceInfo);
+    _refreshDeviceInfo();
+    _refreshTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (mounted && !_loading) {
+        _refreshDeviceInfo();
+      }
+    });
+  }
+
+  Future<void> _refreshDeviceInfo() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+
+    try {
+      final response = await http
+          .get(Uri.parse('$_espBaseUrl/api/device-info'))
+          .timeout(const Duration(seconds: 8));
+
+      if (response.statusCode != 200) {
+        throw Exception('HTTP ${response.statusCode}');
+      }
+
+      final data = jsonDecode(response.body);
+
+      if (!mounted) return;
+
+      setState(() {
+        _deviceInfo = Map<String, dynamic>.from(data);
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _error = 'No se pudo actualizar información del ESP: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+        });
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF020B14),
+      appBar: AppBar(
+        title: const Text('Pruebas del equipo'),
+        backgroundColor: const Color(0xFF061A2E),
+        actions: [
+          IconButton(
+            tooltip: 'Actualizar',
+            onPressed: _loading ? null : _refreshDeviceInfo,
+            icon: const Icon(Icons.refresh_rounded),
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          if (_loading) const LinearProgressIndicator(),
+
+          if (_error != null) ...[
+            const SizedBox(height: 12),
+            Text(
+              _error!,
+              style: const TextStyle(
+                color: Colors.redAccent,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ],
+
+          const SizedBox(height: 12),
+
+          SmartColdMonitorView(data: _deviceInfo, technicianMode: true),
         ],
       ),
     );
@@ -4811,9 +5364,13 @@ class _AssignSensorRolesSheet extends StatefulWidget {
 }
 
 class _InitialConfigurationSheet extends StatefulWidget {
-  const _InitialConfigurationSheet({required this.operationMode});
+  const _InitialConfigurationSheet({
+    required this.operationMode,
+    this.initialCoolingLevel = 4,
+  });
 
   final String operationMode;
+  final int initialCoolingLevel;
 
   @override
   State<_InitialConfigurationSheet> createState() =>
@@ -4822,7 +5379,13 @@ class _InitialConfigurationSheet extends StatefulWidget {
 
 class _InitialConfigurationSheetState
     extends State<_InitialConfigurationSheet> {
-  int _coolingLevel = 4;
+  late int _coolingLevel;
+
+  @override
+  void initState() {
+    super.initState();
+    _coolingLevel = widget.initialCoolingLevel;
+  }
 
   bool get _isFreezer => widget.operationMode == 'freeze';
 
@@ -5012,6 +5575,215 @@ class _AssignSensorRolesSheetState extends State<_AssignSensorRolesSheet> {
     {'value': 'aux3', 'label': 'Auxiliar 3'},
   ];
 
+  double _toDouble(dynamic value, double fallback) {
+    if (value == null) return fallback;
+    if (value is num) return value.toDouble();
+    return double.tryParse(value.toString()) ?? fallback;
+  }
+
+  bool _toBool(dynamic value, bool fallback) {
+    if (value == null) return fallback;
+    if (value is bool) return value;
+    return fallback;
+  }
+
+  bool _isProtectionRole(String role) {
+    return role == 'evaporator' || role == 'condenser' || role == 'compressor';
+  }
+
+  bool _isMonitoringRole(String role) {
+    return role == 'ambient' ||
+        role == 'aux1' ||
+        role == 'aux2' ||
+        role == 'aux3';
+  }
+
+  void _applyDefaultsForRole(Map<String, dynamic> item, String role) {
+    item['role'] = role;
+    item['name'] = _defaultNameForRole(role);
+    item['enabled'] = role.isNotEmpty;
+
+    if (role == 'chamber') {
+      item['alarm_enabled'] = false;
+      item['can_stop_compressor'] = true;
+      item['temp_min_alarm'] = item['temp_min_alarm'] ?? 0;
+      item['temp_max_alarm'] = item['temp_max_alarm'] ?? 8;
+      return;
+    }
+
+    if (role == 'evaporator') {
+      item['alarm_enabled'] = true;
+      item['temp_min_alarm'] = item['temp_min_alarm'] ?? -20;
+      item['temp_max_alarm'] = item['temp_max_alarm'] ?? 30;
+      item['can_stop_compressor'] = item['can_stop_compressor'] ?? false;
+      return;
+    }
+
+    if (role == 'condenser') {
+      item['alarm_enabled'] = true;
+      item['temp_min_alarm'] = item['temp_min_alarm'] ?? -100;
+      item['temp_max_alarm'] = item['temp_max_alarm'] ?? 60;
+      item['can_stop_compressor'] = item['can_stop_compressor'] ?? true;
+      return;
+    }
+
+    if (role == 'compressor') {
+      item['alarm_enabled'] = true;
+      item['temp_min_alarm'] = item['temp_min_alarm'] ?? -100;
+      item['temp_max_alarm'] = item['temp_max_alarm'] ?? 90;
+      item['can_stop_compressor'] = item['can_stop_compressor'] ?? true;
+      return;
+    }
+
+    if (_isMonitoringRole(role)) {
+      item['alarm_enabled'] = true;
+      item['temp_min_alarm'] = item['temp_min_alarm'] ?? -100;
+      item['temp_max_alarm'] = item['temp_max_alarm'] ?? 100;
+      item['can_stop_compressor'] = false;
+    }
+  }
+
+  Widget _numberField({
+    required String label,
+    required dynamic value,
+    required ValueChanged<double> onChanged,
+  }) {
+    final controller = TextEditingController(
+      text: _toDouble(value, 0).toString(),
+    );
+
+    return TextField(
+      controller: controller,
+      keyboardType: const TextInputType.numberWithOptions(
+        decimal: true,
+        signed: true,
+      ),
+      onChanged: (text) {
+        final parsed = double.tryParse(text.replaceAll(',', '.'));
+        if (parsed != null) {
+          onChanged(parsed);
+        }
+      },
+      decoration: InputDecoration(
+        labelText: label,
+        border: const OutlineInputBorder(),
+      ),
+    );
+  }
+
+  Widget _advancedSensorConfig(String address, Map<String, dynamic> item) {
+    final role = item['role']?.toString() ?? '';
+
+    if (role.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    final alarmEnabled = _toBool(item['alarm_enabled'], false);
+    final canStopCompressor = _toBool(item['can_stop_compressor'], false);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 14),
+        const Divider(),
+        const SizedBox(height: 8),
+
+        Text(
+          role == 'chamber' ? 'Configuración cámara' : 'Configuración avanzada',
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+
+        const SizedBox(height: 10),
+
+        _numberField(
+          label: 'Offset / calibración °C',
+          value: item['offset'] ?? 0,
+          onChanged: (value) {
+            item['offset'] = value;
+          },
+        ),
+
+        if (role == 'chamber') ...[
+          const SizedBox(height: 10),
+          const Text(
+            'La cámara controla siempre el compresor. Setpoint, diferencial y alarmas principales se configuran en el paso de Configuración inicial.',
+            style: TextStyle(color: Color(0xFF9DB0C1), fontSize: 12),
+          ),
+        ],
+
+        if (role != 'chamber') ...[
+          const SizedBox(height: 10),
+
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: _numberField(
+                  label: 'Alarma mínima °C',
+                  value: item['temp_min_alarm'],
+                  onChanged: (value) {
+                    item['temp_min_alarm'] = value;
+                    item['alarm_enabled'] = true;
+                  },
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _numberField(
+                  label: 'Alarma máxima °C',
+                  value: item['temp_max_alarm'],
+                  onChanged: (value) {
+                    item['temp_max_alarm'] = value;
+                    item['alarm_enabled'] = true;
+                  },
+                ),
+              ),
+            ],
+          ),
+
+          if (_isProtectionRole(role)) ...[
+            const SizedBox(height: 8),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text(
+                'Puede detener compresor',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              subtitle: Text(
+                role == 'evaporator'
+                    ? 'Útil para proteger por evaporador congelado.'
+                    : role == 'condenser'
+                    ? 'Útil por condensador muy caliente.'
+                    : 'Útil por compresor sobrecalentado.',
+                style: const TextStyle(color: Color(0xFF9DB0C1)),
+              ),
+              value: canStopCompressor,
+              onChanged: (value) {
+                setState(() {
+                  item['can_stop_compressor'] = value;
+                });
+              },
+            ),
+          ],
+
+          if (_isMonitoringRole(role)) ...[
+            const SizedBox(height: 8),
+            const Text(
+              'Este sensor queda como monitoreo/advertencia. No detiene el compresor.',
+              style: TextStyle(color: Color(0xFF9DB0C1), fontSize: 12),
+            ),
+          ],
+        ],
+      ],
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -5083,7 +5855,10 @@ class _AssignSensorRolesSheetState extends State<_AssignSensorRolesSheet> {
 
     Navigator.pop(context, {
       for (final sensor in selected)
-        sensor['address'].toString(): Map<String, dynamic>.from(sensor),
+        sensor['address'].toString(): {
+          ...Map<String, dynamic>.from(sensor),
+          'alarm_enabled': true,
+        },
     });
   }
 
@@ -5184,10 +5959,10 @@ class _AssignSensorRolesSheetState extends State<_AssignSensorRolesSheet> {
                                 item['role'] = '';
                                 item['name'] = 'Sin asignar';
                                 item['enabled'] = false;
+                                item['alarm_enabled'] = false;
+                                item['can_stop_compressor'] = false;
                               } else {
-                                item['role'] = value;
-                                item['name'] = _defaultNameForRole(value);
-                                item['enabled'] = true;
+                                _applyDefaultsForRole(item, value);
                               }
                             });
                           },
@@ -5204,6 +5979,7 @@ class _AssignSensorRolesSheetState extends State<_AssignSensorRolesSheet> {
                           border: OutlineInputBorder(),
                         ),
                       ),
+                      _advancedSensorConfig(address, current),
                     ],
                   ),
                 ),
