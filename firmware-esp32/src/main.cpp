@@ -1726,6 +1726,14 @@ void responderInstallSensors()
       sensor["temp_min_alarm"] = sensoresConfigurados[configuredIndex].tempMinAlarm;
       sensor["temp_max_alarm"] = sensoresConfigurados[configuredIndex].tempMaxAlarm;
       sensor["can_stop_compressor"] = sensoresConfigurados[configuredIndex].canStopCompressor;
+      if (sensoresConfigurados[configuredIndex].role == "evaporator")
+      {
+        sensor["defrost_enabled"] = configDefrostEnabled;
+        sensor["defrost_interval_minutes"] = configDefrostIntervalMinutes;
+        sensor["defrost_duration_minutes"] = configDefrostDurationMinutes;
+        sensor["defrost_end_temperature"] = configDefrostEndTemperature;
+        sensor["drip_time_seconds"] = configDripTimeSeconds;
+      }
     }
     else
     {
@@ -1894,6 +1902,33 @@ void responderGuardarInstallSensors()
     if (role == "evaporator")
     {
       sensorEvaporadorAddress = address;
+
+      configDefrostEnabled = sensor["defrost_enabled"] | false;
+      configDefrostIntervalMinutes = sensor["defrost_interval_minutes"] | 240;
+      configDefrostDurationMinutes = sensor["defrost_duration_minutes"] | 20;
+      configDefrostEndSensorRole = "evaporator";
+      configDefrostEndTemperature = sensor["defrost_end_temperature"] | 8.0;
+      configDripTimeSeconds = sensor["drip_time_seconds"] | 120;
+
+      if (configDefrostIntervalMinutes < 30)
+        configDefrostIntervalMinutes = 30;
+      if (configDefrostIntervalMinutes > 1440)
+        configDefrostIntervalMinutes = 1440;
+
+      if (configDefrostDurationMinutes < 2)
+        configDefrostDurationMinutes = 2;
+      if (configDefrostDurationMinutes > 60)
+        configDefrostDurationMinutes = 60;
+
+      if (configDefrostEndTemperature < -10)
+        configDefrostEndTemperature = -10;
+      if (configDefrostEndTemperature > 25)
+        configDefrostEndTemperature = 25;
+
+      if (configDripTimeSeconds < 10)
+        configDripTimeSeconds = 10;
+      if (configDripTimeSeconds > 600)
+        configDripTimeSeconds = 600;
     }
 
     cantidadSensoresConfigurados++;
@@ -1914,6 +1949,12 @@ void responderGuardarInstallSensors()
   guardarSensoresConfiguradosEnMemoria();
   preferences.putString("cam_addr", sensorCamaraAddress);
   preferences.putString("evap_addr", sensorEvaporadorAddress);
+  preferences.putBool("def_en", configDefrostEnabled);
+  preferences.putInt("def_int", configDefrostIntervalMinutes);
+  preferences.putInt("def_dur", configDefrostDurationMinutes);
+  preferences.putString("def_role", configDefrostEndSensorRole);
+  preferences.putFloat("def_temp", configDefrostEndTemperature);
+  preferences.putInt("drip_sec", configDripTimeSeconds);
 
   installationSensorsDetected = cantidadSensoresDetectados > 0;
   installationSensorsAssigned = true;
@@ -1945,6 +1986,14 @@ void responderGuardarInstallSensors()
     item["temp_min_alarm"] = sensoresConfigurados[i].tempMinAlarm;
     item["temp_max_alarm"] = sensoresConfigurados[i].tempMaxAlarm;
     item["can_stop_compressor"] = sensoresConfigurados[i].canStopCompressor;
+    if (sensoresConfigurados[i].role == "evaporator")
+    {
+      item["defrost_enabled"] = configDefrostEnabled;
+      item["defrost_interval_minutes"] = configDefrostIntervalMinutes;
+      item["defrost_duration_minutes"] = configDefrostDurationMinutes;
+      item["defrost_end_temperature"] = configDefrostEndTemperature;
+      item["drip_time_seconds"] = configDripTimeSeconds;
+    }
   }
 
   String respuesta;
