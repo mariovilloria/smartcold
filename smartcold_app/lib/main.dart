@@ -4330,16 +4330,34 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
       await Future.delayed(const Duration(seconds: 8));
 
       _setProgressStep(1, ProgressStepState.success);
-      _setProgressStep(2, ProgressStepState.running);
-
-      await _loadDeviceInfo();
-
       _setProgressStep(2, ProgressStepState.success);
 
       await Future.delayed(const Duration(milliseconds: 700));
 
       if (mounted) {
         _closeProgressDialog();
+
+        await showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (context) {
+            return AlertDialog(
+              title: const Text('WiFi configurado'),
+              content: Text(
+                'El equipo se conectó correctamente a la red "$ssid".\n\n'
+                'Si la app no actualiza de inmediato, mantén el teléfono conectado al AP SmartCold y presiona Actualizar.',
+              ),
+              actions: [
+                ElevatedButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Continuar'),
+                ),
+              ],
+            );
+          },
+        );
+
+        await _loadDeviceInfo();
       }
     } catch (e) {
       _setProgressStep(1, ProgressStepState.error);
@@ -4414,6 +4432,15 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
               return _AssignSensorRolesSheet(
                 sensors: sensors,
                 initialSensors: initialSensors,
+                initialOperationMode:
+                    _deviceInfo?['operation_mode']?.toString() == 'freeze'
+                    ? 'freeze'
+                    : 'refrigerate',
+                initialCoolingLevel:
+                    int.tryParse(
+                      _deviceInfo?['cooling_level']?.toString() ?? '',
+                    ) ??
+                    4,
               );
             },
           );
@@ -4434,7 +4461,24 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
         );
       }
 
-      await _loadDeviceInfo();
+      final chamberConfig = assigned.values.firstWhere(
+        (sensor) => sensor['role']?.toString() == 'chamber',
+        orElse: () => <String, dynamic>{},
+      );
+
+      if (chamberConfig.isNotEmpty) {
+        await _sendInitialConfiguration({
+          'operation_mode': chamberConfig['operation_mode'],
+          'cooling_level': chamberConfig['cooling_level'],
+          'setpoint': chamberConfig['setpoint'],
+          'differential': chamberConfig['differential'],
+          'min_off_seconds': chamberConfig['min_off_seconds'],
+          'temp_min_alarm': chamberConfig['temp_min_alarm'],
+          'temp_max_alarm': chamberConfig['temp_max_alarm'],
+        });
+      } else {
+        await _loadDeviceInfo();
+      }
     } catch (e) {
       if (!mounted) return;
 
@@ -4448,34 +4492,6 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
         });
       }
     }
-  }
-
-  Future<void> _configureInitialParameters() async {
-    final operationMode = _deviceInfo?['operation_mode']?.toString();
-
-    if (operationMode != 'freeze' && operationMode != 'refrigerate') {
-      setState(() {
-        _error = 'Primero selecciona el tipo de equipo.';
-      });
-      return;
-    }
-
-    final result = await showModalBottomSheet<Map<String, dynamic>>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: const Color(0xFF020B14),
-      builder: (context) {
-        return _InitialConfigurationSheet(
-          operationMode: operationMode!,
-          initialCoolingLevel:
-              (_initialConfiguration?['cooling_level'] as int?) ?? 4,
-        );
-      },
-    );
-
-    if (result == null) return;
-
-    await _sendInitialConfiguration(result);
   }
 
   void _openInstallationTests() {
@@ -4538,51 +4554,9 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
     }
   }
 
-  Future<void> _saveOperationMode(String operationMode) async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-
-    try {
-      final response = await http
-          .post(
-            Uri.parse('$_espBaseUrl/api/install/operation-mode'),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'operation_mode': operationMode}),
-          )
-          .timeout(const Duration(seconds: 8));
-
-      if (response.statusCode != 200) {
-        throw Exception('HTTP ${response.statusCode}: ${response.body}');
-      }
-
-      await _loadDeviceInfo();
-    } catch (e) {
-      if (!mounted) return;
-
-      setState(() {
-        _error = 'Error guardando tipo de equipo: $e';
-      });
-    } finally {
-      if (mounted) {
-        setState(() {
-          _loading = false;
-        });
-      }
-    }
-  }
-
-  String _modeLabel(String? value) {
-    if (value == 'freeze') return 'Congelador';
-    if (value == 'refrigerate') return 'Refrigerador';
-    return 'Sin definir';
-  }
-
   @override
   Widget build(BuildContext context) {
     final wifiConfigured = _deviceInfo?['wifi_configured'] == true;
-    final operationMode = _deviceInfo?['operation_mode']?.toString();
 
     return Scaffold(
       backgroundColor: const Color(0xFF020B14),
@@ -4647,55 +4621,7 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
 
           _InstallationActionCard(
             number: 3,
-            title: 'Tipo de equipo',
-            subtitle: 'Actual: ${_modeLabel(operationMode)}',
-            completed:
-                operationMode == 'freeze' || operationMode == 'refrigerate',
-            buttonText:
-                operationMode == 'freeze' || operationMode == 'refrigerate'
-                ? 'Cambiar tipo'
-                : 'Seleccionar tipo',
-            onPressed: _deviceInfo == null || _loading
-                ? null
-                : () async {
-                    final selected = await showModalBottomSheet<String>(
-                      context: context,
-                      backgroundColor: const Color(0xFF020B14),
-                      builder: (context) {
-                        return SafeArea(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              ListTile(
-                                leading: const Icon(Icons.kitchen_rounded),
-                                title: const Text('Refrigerador'),
-                                subtitle: const Text(
-                                  'Trabajo sobre 1 °C a 7 °C',
-                                ),
-                                onTap: () =>
-                                    Navigator.pop(context, 'refrigerate'),
-                              ),
-                              ListTile(
-                                leading: const Icon(Icons.ac_unit_rounded),
-                                title: const Text('Congelador'),
-                                subtitle: const Text('Trabajo bajo cero'),
-                                onTap: () => Navigator.pop(context, 'freeze'),
-                              ),
-                            ],
-                          ),
-                        );
-                      },
-                    );
-
-                    if (selected == null) return;
-
-                    await _saveOperationMode(selected);
-                  },
-          ),
-
-          _InstallationActionCard(
-            number: 4,
-            title: 'Sensores',
+            title: 'Sensores y funciones',
             subtitle: _deviceInfo?['sensors_assigned'] == true
                 ? 'Sensores detectados y asignados.'
                 : 'Detectar sondas DS18B20 y asignar roles.',
@@ -4708,24 +4634,7 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
                 : _detectAndAssignSensors,
           ),
           _InstallationActionCard(
-            number: 5,
-            title: 'Configuración inicial',
-            subtitle: _initialConfiguration == null
-                ? 'Configurar nivel de frío, setpoint, diferencial y alarmas.'
-                : 'Nivel ${_initialConfiguration?['cooling_level']} · Setpoint ${(_initialConfiguration?['setpoint'] as num).toStringAsFixed(1)} °C',
-            completed: _initialConfiguration != null,
-            buttonText: _initialConfiguration == null
-                ? 'Configurar parámetros'
-                : 'Cambiar parámetros',
-            onPressed:
-                _deviceInfo == null ||
-                    _loading ||
-                    _deviceInfo?['sensors_assigned'] != true
-                ? null
-                : _configureInitialParameters,
-          ),
-          _InstallationActionCard(
-            number: 6,
+            number: 4,
             title: 'Pruebas del equipo',
             subtitle:
                 'Verificar lecturas, configuración y vista previa del cliente.',
@@ -5353,41 +5262,61 @@ class _AssignSensorRolesSheet extends StatefulWidget {
   const _AssignSensorRolesSheet({
     required this.sensors,
     required this.initialSensors,
+    required this.initialOperationMode,
+    required this.initialCoolingLevel,
   });
 
   final List<Map<String, dynamic>> sensors;
   final Map<String, Map<String, dynamic>> initialSensors;
+  final String initialOperationMode;
+  final int initialCoolingLevel;
 
   @override
   State<_AssignSensorRolesSheet> createState() =>
       _AssignSensorRolesSheetState();
 }
 
-class _InitialConfigurationSheet extends StatefulWidget {
-  const _InitialConfigurationSheet({
-    required this.operationMode,
-    this.initialCoolingLevel = 4,
-  });
-
-  final String operationMode;
-  final int initialCoolingLevel;
-
-  @override
-  State<_InitialConfigurationSheet> createState() =>
-      _InitialConfigurationSheetState();
-}
-
-class _InitialConfigurationSheetState
-    extends State<_InitialConfigurationSheet> {
+class _AssignSensorRolesSheetState extends State<_AssignSensorRolesSheet> {
+  late Map<String, Map<String, dynamic>> _sensorsByAddress;
+  String? _error;
+  late String _operationMode;
   late int _coolingLevel;
+  final List<Map<String, String>> _availableRoles = const [
+    {'value': '', 'label': 'Sin asignar'},
+    {'value': 'chamber', 'label': 'Cámara'},
+    {'value': 'evaporator', 'label': 'Evaporador'},
+    {'value': 'condenser', 'label': 'Condensador'},
+    {'value': 'compressor', 'label': 'Compresor'},
+    {'value': 'ambient', 'label': 'Ambiente'},
+    {'value': 'aux1', 'label': 'Auxiliar 1'},
+    {'value': 'aux2', 'label': 'Auxiliar 2'},
+    {'value': 'aux3', 'label': 'Auxiliar 3'},
+  ];
 
-  @override
-  void initState() {
-    super.initState();
-    _coolingLevel = widget.initialCoolingLevel;
+  double _toDouble(dynamic value, double fallback) {
+    if (value == null) return fallback;
+    if (value is num) return value.toDouble();
+    return double.tryParse(value.toString()) ?? fallback;
   }
 
-  bool get _isFreezer => widget.operationMode == 'freeze';
+  bool _toBool(dynamic value, bool fallback) {
+    if (value == null) return fallback;
+    if (value is bool) return value;
+    return fallback;
+  }
+
+  bool _isProtectionRole(String role) {
+    return role == 'evaporator' || role == 'condenser' || role == 'compressor';
+  }
+
+  bool _isMonitoringRole(String role) {
+    return role == 'ambient' ||
+        role == 'aux1' ||
+        role == 'aux2' ||
+        role == 'aux3';
+  }
+
+  bool get _isFreezer => _operationMode == 'freeze';
 
   double get _setpoint {
     if (_isFreezer) {
@@ -5429,173 +5358,16 @@ class _InitialConfigurationSheetState
 
   int get _minOffSeconds => 180;
 
-  @override
-  Widget build(BuildContext context) {
-    final modeLabel = _isFreezer ? 'Congelador' : 'Refrigerador';
-
-    return SafeArea(
-      child: Padding(
-        padding: EdgeInsets.only(
-          left: 16,
-          right: 16,
-          top: 16,
-          bottom: MediaQuery.of(context).viewInsets.bottom + 16,
-        ),
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text(
-                'Configuración inicial',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 20,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Tipo de equipo: $modeLabel',
-                style: const TextStyle(
-                  color: Color(0xFF9DB0C1),
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 20),
-
-              const Text(
-                'Nivel de frío',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-              Slider(
-                value: _coolingLevel.toDouble(),
-                min: 1,
-                max: 7,
-                divisions: 6,
-                label: _coolingLevel.toString(),
-                onChanged: (value) {
-                  setState(() {
-                    _coolingLevel = value.round();
-                  });
-                },
-              ),
-              Text(
-                'Nivel $_coolingLevel de 7',
-                style: const TextStyle(color: Color(0xFF9DB0C1)),
-              ),
-
-              const SizedBox(height: 20),
-
-              Card(
-                color: const Color(0xFF061A2E),
-                child: Padding(
-                  padding: const EdgeInsets.all(14),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Resumen calculado',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w900,
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      Text(
-                        'Temperatura objetivo: ${_setpoint.toStringAsFixed(1)} °C',
-                        style: const TextStyle(color: Color(0xFF9DB0C1)),
-                      ),
-                      Text(
-                        'Encendido compresor: ${_turnOnTemperature.toStringAsFixed(1)} °C',
-                        style: const TextStyle(color: Color(0xFF9DB0C1)),
-                      ),
-                      Text(
-                        'Diferencial: ${_differential.toStringAsFixed(1)} °C',
-                        style: const TextStyle(color: Color(0xFF9DB0C1)),
-                      ),
-                      Text(
-                        'Protección compresor: $_minOffSeconds segundos',
-                        style: const TextStyle(color: Color(0xFF9DB0C1)),
-                      ),
-                      Text(
-                        'Alarma baja cámara: ${_tempMinAlarm.toStringAsFixed(1)} °C',
-                        style: const TextStyle(color: Color(0xFF9DB0C1)),
-                      ),
-                      Text(
-                        'Alarma alta cámara: ${_tempMaxAlarm.toStringAsFixed(1)} °C',
-                        style: const TextStyle(color: Color(0xFF9DB0C1)),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-
-              const SizedBox(height: 20),
-
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: () {
-                    Navigator.pop(context, {
-                      'operation_mode': widget.operationMode,
-                      'cooling_level': _coolingLevel,
-                      'setpoint': _setpoint,
-                      'differential': _differential,
-                      'min_off_seconds': _minOffSeconds,
-                      'temp_min_alarm': _tempMinAlarm,
-                      'temp_max_alarm': _tempMaxAlarm,
-                    });
-                  },
-                  child: const Text('Guardar configuración'),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _AssignSensorRolesSheetState extends State<_AssignSensorRolesSheet> {
-  late Map<String, Map<String, dynamic>> _sensorsByAddress;
-  String? _error;
-  final List<Map<String, String>> _availableRoles = const [
-    {'value': '', 'label': 'Sin asignar'},
-    {'value': 'chamber', 'label': 'Cámara'},
-    {'value': 'evaporator', 'label': 'Evaporador'},
-    {'value': 'condenser', 'label': 'Condensador'},
-    {'value': 'compressor', 'label': 'Compresor'},
-    {'value': 'ambient', 'label': 'Ambiente'},
-    {'value': 'aux1', 'label': 'Auxiliar 1'},
-    {'value': 'aux2', 'label': 'Auxiliar 2'},
-    {'value': 'aux3', 'label': 'Auxiliar 3'},
-  ];
-
-  double _toDouble(dynamic value, double fallback) {
-    if (value == null) return fallback;
-    if (value is num) return value.toDouble();
-    return double.tryParse(value.toString()) ?? fallback;
-  }
-
-  bool _toBool(dynamic value, bool fallback) {
-    if (value == null) return fallback;
-    if (value is bool) return value;
-    return fallback;
-  }
-
-  bool _isProtectionRole(String role) {
-    return role == 'evaporator' || role == 'condenser' || role == 'compressor';
-  }
-
-  bool _isMonitoringRole(String role) {
-    return role == 'ambient' ||
-        role == 'aux1' ||
-        role == 'aux2' ||
-        role == 'aux3';
+  Map<String, dynamic> _calculatedMainControlConfig() {
+    return {
+      'operation_mode': _operationMode,
+      'cooling_level': _coolingLevel,
+      'setpoint': _setpoint,
+      'differential': _differential,
+      'min_off_seconds': _minOffSeconds,
+      'temp_min_alarm': _tempMinAlarm,
+      'temp_max_alarm': _tempMaxAlarm,
+    };
   }
 
   void _applyDefaultsForRole(Map<String, dynamic> item, String role) {
@@ -5616,6 +5388,14 @@ class _AssignSensorRolesSheetState extends State<_AssignSensorRolesSheet> {
       item['temp_min_alarm'] = item['temp_min_alarm'] ?? -20;
       item['temp_max_alarm'] = item['temp_max_alarm'] ?? 30;
       item['can_stop_compressor'] = item['can_stop_compressor'] ?? false;
+      item['defrost_enabled'] = item['defrost_enabled'] ?? false;
+      item['defrost_interval_minutes'] =
+          item['defrost_interval_minutes'] ?? 240;
+      item['defrost_duration_minutes'] = item['defrost_duration_minutes'] ?? 20;
+      item['defrost_end_by_temperature'] =
+          item['defrost_end_by_temperature'] ?? true;
+      item['defrost_end_temperature'] = item['defrost_end_temperature'] ?? 8;
+      item['drip_time_seconds'] = item['drip_time_seconds'] ?? 120;
       return;
     }
 
@@ -5677,8 +5457,6 @@ class _AssignSensorRolesSheetState extends State<_AssignSensorRolesSheet> {
     if (role.isEmpty) {
       return const SizedBox.shrink();
     }
-
-    final alarmEnabled = _toBool(item['alarm_enabled'], false);
     final canStopCompressor = _toBool(item['can_stop_compressor'], false);
 
     return Column(
@@ -5707,10 +5485,104 @@ class _AssignSensorRolesSheetState extends State<_AssignSensorRolesSheet> {
         ),
 
         if (role == 'chamber') ...[
-          const SizedBox(height: 10),
+          const SizedBox(height: 14),
+
           const Text(
-            'La cámara controla siempre el compresor. Setpoint, diferencial y alarmas principales se configuran en el paso de Configuración inicial.',
-            style: TextStyle(color: Color(0xFF9DB0C1), fontSize: 12),
+            'Modo de trabajo',
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900),
+          ),
+          const SizedBox(height: 8),
+
+          SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(
+                value: 'refrigerate',
+                label: Text('Refrigerador'),
+                icon: Icon(Icons.kitchen_rounded),
+              ),
+              ButtonSegment(
+                value: 'freeze',
+                label: Text('Congelador'),
+                icon: Icon(Icons.ac_unit_rounded),
+              ),
+            ],
+            selected: {_operationMode},
+            onSelectionChanged: (values) {
+              setState(() {
+                _operationMode = values.first;
+              });
+            },
+          ),
+
+          const SizedBox(height: 18),
+
+          const Text(
+            'Nivel de frío',
+            style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900),
+          ),
+
+          Slider(
+            value: _coolingLevel.toDouble(),
+            min: 1,
+            max: 7,
+            divisions: 6,
+            label: _coolingLevel.toString(),
+            onChanged: (value) {
+              setState(() {
+                _coolingLevel = value.round();
+              });
+            },
+          ),
+
+          Text(
+            'Nivel $_coolingLevel de 7',
+            style: const TextStyle(color: Color(0xFF9DB0C1)),
+          ),
+
+          const SizedBox(height: 14),
+
+          Card(
+            color: const Color(0xFF020B14),
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Configuración calculada',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Setpoint: ${_setpoint.toStringAsFixed(1)} °C',
+                    style: const TextStyle(color: Color(0xFF9DB0C1)),
+                  ),
+                  Text(
+                    'Enciende: ${_turnOnTemperature.toStringAsFixed(1)} °C',
+                    style: const TextStyle(color: Color(0xFF9DB0C1)),
+                  ),
+                  Text(
+                    'Apaga: ${_setpoint.toStringAsFixed(1)} °C',
+                    style: const TextStyle(color: Color(0xFF9DB0C1)),
+                  ),
+                  Text(
+                    'Alarma baja: ${_tempMinAlarm.toStringAsFixed(1)} °C',
+                    style: const TextStyle(color: Color(0xFF9DB0C1)),
+                  ),
+                  Text(
+                    'Alarma alta: ${_tempMaxAlarm.toStringAsFixed(1)} °C',
+                    style: const TextStyle(color: Color(0xFF9DB0C1)),
+                  ),
+                  Text(
+                    'Protección compresor: $_minOffSeconds segundos',
+                    style: const TextStyle(color: Color(0xFF9DB0C1)),
+                  ),
+                ],
+              ),
+            ),
           ),
         ],
 
@@ -5771,7 +5643,83 @@ class _AssignSensorRolesSheetState extends State<_AssignSensorRolesSheet> {
               },
             ),
           ],
+          if (role == 'evaporator') ...[
+            const SizedBox(height: 8),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text(
+                'Activar defrost',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              subtitle: const Text(
+                'El evaporador controlará el deshielo y el tiempo de goteo.',
+                style: TextStyle(color: Color(0xFF9DB0C1)),
+              ),
+              value: item['defrost_enabled'] == true,
+              onChanged: (value) {
+                setState(() {
+                  item['defrost_enabled'] = value;
+                  item['defrost_interval_minutes'] ??= 240;
+                  item['defrost_duration_minutes'] ??= 20;
+                  item['defrost_end_by_temperature'] ??= true;
+                  item['defrost_end_temperature'] ??= 8;
+                  item['drip_time_seconds'] ??= 120;
+                });
+              },
+            ),
 
+            if (item['defrost_enabled'] == true) ...[
+              const SizedBox(height: 10),
+              const Divider(),
+              const SizedBox(height: 8),
+              const Text(
+                'Parámetros de defrost',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 10),
+              _numberField(
+                label: 'Intervalo entre deshielos min (30-1440)',
+                value: item['defrost_interval_minutes'],
+                onChanged: (value) {
+                  item['defrost_interval_minutes'] = value.round();
+                },
+              ),
+
+              const SizedBox(height: 10),
+
+              _numberField(
+                label: 'Duración máxima min (2-60)',
+                value: item['defrost_duration_minutes'],
+                onChanged: (value) {
+                  item['defrost_duration_minutes'] = value.round();
+                },
+              ),
+              const SizedBox(height: 8),
+              _numberField(
+                label: 'Temperatura fin defrost °C',
+                value: item['defrost_end_temperature'],
+                onChanged: (value) {
+                  item['defrost_end_temperature'] = value;
+                },
+              ),
+
+              const SizedBox(height: 10),
+
+              _numberField(
+                label: 'Tiempo de goteo seg (10-600)',
+                value: item['drip_time_seconds'],
+                onChanged: (value) {
+                  item['drip_time_seconds'] = value.round();
+                },
+              ),
+            ],
+          ],
           if (_isMonitoringRole(role)) ...[
             const SizedBox(height: 8),
             const Text(
@@ -5787,6 +5735,8 @@ class _AssignSensorRolesSheetState extends State<_AssignSensorRolesSheet> {
   @override
   void initState() {
     super.initState();
+    _operationMode = widget.initialOperationMode;
+    _coolingLevel = widget.initialCoolingLevel;
     _sensorsByAddress = Map<String, Map<String, dynamic>>.from(
       widget.initialSensors,
     );
@@ -5837,6 +5787,47 @@ class _AssignSensorRolesSheetState extends State<_AssignSensorRolesSheet> {
   }
 
   void _submit() {
+    Map<String, dynamic> normalizeSensor(Map<String, dynamic> sensor) {
+      final normalized = Map<String, dynamic>.from(sensor);
+
+      normalized['alarm_enabled'] = true;
+
+      if (normalized['role']?.toString() == 'chamber') {
+        normalized['temp_min_alarm'] = _tempMinAlarm;
+        normalized['temp_max_alarm'] = _tempMaxAlarm;
+        normalized['can_stop_compressor'] = true;
+        normalized.addAll(_calculatedMainControlConfig());
+      }
+
+      if (normalized['role']?.toString() == 'evaporator') {
+        normalized['defrost_enabled'] = normalized['defrost_enabled'] == true;
+
+        normalized['defrost_interval_minutes'] = (_toDouble(
+          normalized['defrost_interval_minutes'],
+          240,
+        )).clamp(30, 1440).round();
+
+        normalized['defrost_duration_minutes'] = (_toDouble(
+          normalized['defrost_duration_minutes'],
+          20,
+        )).clamp(2, 60).round();
+
+        normalized['defrost_end_by_temperature'] = true;
+
+        normalized['defrost_end_temperature'] = (_toDouble(
+          normalized['defrost_end_temperature'],
+          8,
+        )).clamp(-10, 25).toDouble();
+
+        normalized['drip_time_seconds'] = (_toDouble(
+          normalized['drip_time_seconds'],
+          120,
+        )).clamp(10, 600).round();
+      }
+
+      return normalized;
+    }
+
     final selected = _sensorsByAddress.values.where((sensor) {
       final role = sensor['role']?.toString() ?? '';
       return role.isNotEmpty;
@@ -5852,13 +5843,54 @@ class _AssignSensorRolesSheetState extends State<_AssignSensorRolesSheet> {
       });
       return;
     }
+    for (final sensor in selected) {
+      if (sensor['role']?.toString() == 'evaporator' &&
+          sensor['defrost_enabled'] == true) {
+        final interval = _toDouble(
+          sensor['defrost_interval_minutes'],
+          240,
+        ).round();
+        final duration = _toDouble(
+          sensor['defrost_duration_minutes'],
+          20,
+        ).round();
+        final endTemp = _toDouble(sensor['defrost_end_temperature'], 8);
+        final drip = _toDouble(sensor['drip_time_seconds'], 120).round();
 
+        if (interval < 30 || interval > 1440) {
+          setState(() {
+            _error =
+                'El intervalo de defrost debe estar entre 30 y 1440 minutos.';
+          });
+          return;
+        }
+
+        if (duration < 2 || duration > 60) {
+          setState(() {
+            _error = 'La duración del defrost debe estar entre 2 y 60 minutos.';
+          });
+          return;
+        }
+
+        if (endTemp < -10 || endTemp > 25) {
+          setState(() {
+            _error =
+                'La temperatura de finalización debe estar entre -10 °C y 25 °C.';
+          });
+          return;
+        }
+
+        if (drip < 10 || drip > 600) {
+          setState(() {
+            _error = 'El tiempo de goteo debe estar entre 10 y 600 segundos.';
+          });
+          return;
+        }
+      }
+    }
     Navigator.pop(context, {
       for (final sensor in selected)
-        sensor['address'].toString(): {
-          ...Map<String, dynamic>.from(sensor),
-          'alarm_enabled': true,
-        },
+        sensor['address'].toString(): normalizeSensor(sensor),
     });
   }
 
@@ -6203,6 +6235,8 @@ class InstallationWizardPage extends StatelessWidget {
                                 )
                                 .toList(),
                             initialSensors: {},
+                            initialOperationMode: 'refrigerate',
+                            initialCoolingLevel: 4,
                           );
                         },
                       );
