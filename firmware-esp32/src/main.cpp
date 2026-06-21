@@ -92,8 +92,28 @@ struct SensorConfigurado
 SensorConfigurado sensoresConfigurados[MAX_SENSORES_CONFIGURADOS];
 int cantidadSensoresConfigurados = 0;
 
-const bool MODO_PRUEBA_TEMPERATURA = false;
-unsigned long ultimoCambioTemperaturaPrueba = 0;
+//====================================================
+// MODO SIMULACION SMARTCOLD
+//====================================================
+// Cambiar a true solo para pruebas de firmware.
+// En producción debe quedar en false.
+const bool SIMULATION_MODE = false;
+
+enum SimulationScenario
+{
+  REAL_SENSORS = 0,
+  NORMAL_COOLING,
+  HOT_CHAMBER,
+  CHAMBER_REACHED_SETPOINT,
+  EVAPORATOR_DEFROST_END,
+  CHAMBER_SENSOR_FAILURE,
+  EVAPORATOR_SENSOR_FAILURE,
+  HOT_CONDENSER,
+  HOT_COMPRESSOR
+};
+
+// Cambia este valor cuando SIMULATION_MODE = true.
+const SimulationScenario SIMULATION_SCENARIO = HOT_CHAMBER;
 
 bool compressorRelayOn = false;
 int compressorOutputPin = PIN_RELAY_COMPRESSOR;
@@ -155,8 +175,46 @@ unsigned long wifiProcesarDespuesDeMs = 0;
 //====================================================
 // ESTADO DE INSTALACION
 //====================================================
-
+bool serviceMode = false;
 bool installationCompleted = false;
+enum DeviceMode
+{
+  DEVICE_MODE_INSTALLATION,
+  DEVICE_MODE_OPERATION,
+  DEVICE_MODE_SERVICE
+};
+
+DeviceMode currentDeviceMode = DEVICE_MODE_INSTALLATION;
+
+String deviceModeToString(DeviceMode mode)
+{
+  switch (mode)
+  {
+  case DEVICE_MODE_INSTALLATION:
+    return "INSTALLATION";
+  case DEVICE_MODE_OPERATION:
+    return "OPERATION";
+  case DEVICE_MODE_SERVICE:
+    return "SERVICE";
+  default:
+    return "UNKNOWN";
+  }
+}
+
+DeviceMode calcularDeviceMode()
+{
+  if (serviceMode)
+  {
+    return DEVICE_MODE_SERVICE;
+  }
+
+  if (installationCompleted)
+  {
+    return DEVICE_MODE_OPERATION;
+  }
+
+  return DEVICE_MODE_INSTALLATION;
+}
 
 String installationStatus = "NEW";
 // NEW
@@ -197,6 +255,8 @@ void guardarEstadoInstalacionLocal()
   preferences.putBool("inst_sens_det", installationSensorsDetected);
 
   preferences.putBool("inst_sens_asg", installationSensorsAssigned);
+
+  preferences.putBool("service_mode", serviceMode);
 }
 
 void cargarEstadoInstalacionLocal()
@@ -230,11 +290,19 @@ void cargarEstadoInstalacionLocal()
 
   installationSensorsAssigned =
       preferences.getBool("inst_sens_asg", false);
+
+  serviceMode =
+      preferences.getBool("service_mode", false);
 }
 void descargarConfiguracion();
 String nombreSensorPorRole(String role);
 void actualizarSensoresDetectados();
 int buscarSensorConfiguradoPorAddress(String address);
+bool simulacionSensorTieneLectura(String role);
+float obtenerTemperaturaSimuladaPorRole(String role);
+void aplicarLecturasSimuladas();
+void iniciarModoServicioLocal();
+void finalizarModoServicioLocal();
 
 String obtenerEstadoOperativo()
 {
@@ -243,6 +311,16 @@ String obtenerEstadoOperativo()
 
   if (dripActive)
     return "DRIP";
+
+  for (int i = 0; i < cantidadSensoresConfigurados; i++)
+  {
+    if (sensoresConfigurados[i].enabled &&
+        sensoresConfigurados[i].canStopCompressor &&
+        sensoresConfigurados[i].inAlarm)
+    {
+      return "PROTECTION";
+    }
+  }
 
   if (localProtectionActive)
     return "PROTECTION";
@@ -350,6 +428,7 @@ void enviarTelemetria()
 
   HTTPClient http;
   String url = API_BASE_URL + "/api/telemetry";
+  http.setTimeout(5000);
 
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
@@ -363,7 +442,9 @@ void enviarTelemetria()
   doc["online"] = true;
   doc["configured"] = true;
   doc["provisioning_status"] = "commissioned";
-
+  currentDeviceMode = calcularDeviceMode();
+  doc["device_mode"] = deviceModeToString(currentDeviceMode);
+  doc["service_mode"] = serviceMode;
   doc["temperature"] = temperaturaActual;
   doc["humidity"] = 65;
 
@@ -380,11 +461,6 @@ void enviarTelemetria()
       compressorRuntimeSinceDefrostSeconds;
 
   doc["defrost_active"] = defrostActive;
-  doc["defrost_interval_minutes"] = configDefrostIntervalMinutes;
-  doc["defrost_duration_minutes"] = configDefrostDurationMinutes;
-  doc["defrost_end_temperature"] = configDefrostEndTemperature;
-  doc["defrost_end_sensor_role"] = configDefrostEndSensorRole;
-  doc["drip_time_seconds"] = configDripTimeSeconds;
 
   JsonArray detectedSensors = doc["detected_sensors"].to<JsonArray>();
 
@@ -442,6 +518,21 @@ void enviarTelemetria()
   if (!error)
   {
     bool configPending = responseDoc["config_pending"] | false;
+    bool remoteServiceMode = responseDoc["service_mode"] | serviceMode;
+
+    if (remoteServiceMode && !serviceMode)
+    {
+      Serial.println("🛠️ Backend solicita activar modo servicio.");
+      iniciarModoServicioLocal();
+      return;
+    }
+
+    if (!remoteServiceMode && serviceMode)
+    {
+      Serial.println("✅ Backend solicita finalizar modo servicio.");
+      finalizarModoServicioLocal();
+      return;
+    }
 
     if (configPending)
     {
@@ -459,9 +550,9 @@ void enviarTelemetria()
 }
 bool tieneConfiguracionOperativa()
 {
-  return configUpdatedAt.length() > 0 &&
-         cantidadSensoresConfigurados > 0 &&
-         sensorCamaraAddress.length() > 0;
+  return cantidadSensoresConfigurados > 0 &&
+         sensorCamaraAddress.length() > 0 &&
+         configControlSensorRole.length() > 0;
 }
 
 bool respuestaTieneConfiguracionOperativa(JsonObject config)
@@ -538,6 +629,7 @@ void confirmarConfiguracionDescargada()
 
   HTTPClient http;
   String url = API_BASE_URL + "/api/devices/" + DEVICE_ID + "/config/ack";
+  http.setTimeout(5000);
 
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
@@ -579,6 +671,7 @@ void descargarConfiguracion()
 
   HTTPClient http;
   String url = API_BASE_URL + "/api/devices/" + DEVICE_ID + "/config";
+  http.setTimeout(5000);
 
   http.begin(url);
 
@@ -621,6 +714,22 @@ void descargarConfiguracion()
   if (!respuestaTieneConfiguracionOperativa(config))
   {
     Serial.println("⚙️ Backend no entrego configuracion operativa completa.");
+
+    if (installationCompleted && tieneConfiguracionOperativa())
+    {
+      Serial.println("✅ Equipo ya comisionado localmente.");
+      Serial.println("✅ Se conserva configuracion local hasta que backend entregue una configuracion valida.");
+
+      http.end();
+
+      if (configPending)
+      {
+        Serial.println("⚠️ Config pendiente invalida. No se confirma ACK.");
+      }
+
+      return;
+    }
+
     Serial.println("Equipo permanece en modo instalacion. No se guardan parametros locales.");
 
     borrarConfiguracionOperativaGuardada();
@@ -1276,29 +1385,8 @@ void calcularControlCompresorLocal()
 
 void actualizarTemperaturaPrueba()
 {
-  if (!MODO_PRUEBA_TEMPERATURA)
-  {
-    return;
-  }
-
-  if (millis() - ultimoCambioTemperaturaPrueba >= 30000)
-  {
-    ultimoCambioTemperaturaPrueba = millis();
-
-    if (temperaturaActual >= 6.0)
-    {
-      temperaturaActual = 3.0;
-    }
-    else
-    {
-      temperaturaActual = 7.0;
-    }
-
-    Serial.println();
-    Serial.println("🧪 MODO PRUEBA TEMPERATURA");
-    Serial.print("Nueva temperatura simulada: ");
-    Serial.println(temperaturaActual);
-  }
+  // Modo antiguo de prueba desactivado.
+  // La simulación nueva se manejará por SIMULATION_MODE y SIMULATION_SCENARIO.
 }
 
 void imprimirDireccionSensor(DeviceAddress direccion)
@@ -1636,6 +1724,137 @@ int buscarSensorConfiguradoPorAddress(String address)
   return -1;
 }
 
+bool simulacionSensorTieneLectura(String role)
+{
+  role.toLowerCase();
+
+  if (!SIMULATION_MODE)
+    return true;
+
+  if (SIMULATION_SCENARIO == CHAMBER_SENSOR_FAILURE && role == "chamber")
+    return false;
+
+  if (SIMULATION_SCENARIO == EVAPORATOR_SENSOR_FAILURE && role == "evaporator")
+    return false;
+
+  return true;
+}
+
+float obtenerTemperaturaSimuladaPorRole(String role)
+{
+  role.toLowerCase();
+
+  if (!SIMULATION_MODE)
+    return NAN;
+
+  switch (SIMULATION_SCENARIO)
+  {
+  case NORMAL_COOLING:
+    if (role == "chamber")
+      return configSetpoint + 1.0;
+    if (role == "evaporator")
+      return -5.0;
+    break;
+
+  case HOT_CHAMBER:
+    if (role == "chamber")
+      return configSetpoint + configDifferential + 4.0;
+    if (role == "evaporator")
+      return -3.0;
+    break;
+
+  case CHAMBER_REACHED_SETPOINT:
+    if (role == "chamber")
+      return configSetpoint - 0.5;
+    if (role == "evaporator")
+      return -6.0;
+    break;
+
+  case EVAPORATOR_DEFROST_END:
+    if (role == "chamber")
+      return configSetpoint + 1.0;
+    if (role == "evaporator")
+      return configDefrostEndTemperature + 1.0;
+    break;
+
+  case HOT_CONDENSER:
+    if (role == "condenser")
+      return 75.0;
+    if (role == "chamber")
+      return configSetpoint + configDifferential + 1.0;
+    break;
+
+  case HOT_COMPRESSOR:
+    if (role == "compressor")
+      return 95.0;
+    if (role == "chamber")
+      return configSetpoint + configDifferential + 1.0;
+    break;
+
+  case CHAMBER_SENSOR_FAILURE:
+    if (role == "chamber")
+      return NAN;
+    if (role == "evaporator")
+      return -5.0;
+    break;
+
+  case EVAPORATOR_SENSOR_FAILURE:
+    if (role == "evaporator")
+      return NAN;
+    if (role == "chamber")
+      return configSetpoint + 1.0;
+    break;
+
+  case REAL_SENSORS:
+  default:
+    return NAN;
+  }
+
+  if (role == "ambient")
+    return 28.0;
+
+  return 30.0;
+}
+
+void aplicarLecturasSimuladas()
+{
+  cantidadSensoresDetectados = 0;
+
+  Serial.println();
+  Serial.println("🧪 MODO SIMULACION SMARTCOLD ACTIVO");
+
+  for (int i = 0; i < cantidadSensoresConfigurados; i++)
+  {
+    SensorConfigurado &sensor = sensoresConfigurados[i];
+
+    bool tieneLectura = simulacionSensorTieneLectura(sensor.role);
+    float temperatura = obtenerTemperaturaSimuladaPorRole(sensor.role);
+
+    sensor.hasReading = tieneLectura && !isnan(temperatura);
+    sensor.temperature = sensor.hasReading ? temperatura + sensor.offset : NAN;
+
+    if (sensor.hasReading && cantidadSensoresDetectados < MAX_SENSORES_DS18B20)
+    {
+      sensoresDetectados[cantidadSensoresDetectados] = sensor.address;
+      cantidadSensoresDetectados++;
+    }
+
+    Serial.print("Simulado ");
+    Serial.print(sensor.role);
+    Serial.print(": ");
+
+    if (sensor.hasReading)
+    {
+      Serial.print(sensor.temperature);
+      Serial.println(" °C");
+    }
+    else
+    {
+      Serial.println("SIN LECTURA");
+    }
+  }
+}
+
 void actualizarSensoresDetectados()
 {
   cantidadSensoresDetectados = 0;
@@ -1644,6 +1863,12 @@ void actualizarSensoresDetectados()
   {
     sensoresConfigurados[i].temperature = NAN;
     sensoresConfigurados[i].hasReading = false;
+  }
+
+  if (SIMULATION_MODE)
+  {
+    aplicarLecturasSimuladas();
+    return;
   }
 
   sensoresDS18B20.begin();
@@ -2017,6 +2242,9 @@ void responderDeviceInfo()
   doc["installer_uid"] = installerUid;
   doc["configured"] = installationCompleted;
   doc["provisioning_status"] = installationCompleted ? "configured" : "pending_installation";
+  currentDeviceMode = calcularDeviceMode();
+  doc["device_mode"] = deviceModeToString(currentDeviceMode);
+  doc["service_mode"] = serviceMode;
 
   doc["installation_phase"] = installationPhase;
   doc["wifi_configured"] = installationWifiConfigured;
@@ -2239,6 +2467,42 @@ void responderFactoryReset()
   ejecutarFactoryResetCompleto();
 }
 
+void responderIniciarModoServicio()
+{
+  servidorInstalacion.send(
+      200,
+      "application/json",
+      "{\"success\":true,\"message\":\"service_mode_starting\"}");
+
+  Serial.println();
+  Serial.println("🛠️ Solicitud recibida: iniciar modo servicio.");
+
+  delay(500);
+
+  iniciarModoServicioLocal();
+}
+
+void responderFinalizarModoServicio()
+{
+  serviceMode = false;
+  currentDeviceMode = calcularDeviceMode();
+  guardarEstadoInstalacionLocal();
+
+  JsonDocument respuesta;
+  respuesta["success"] = true;
+  respuesta["device_id"] = DEVICE_ID;
+  respuesta["service_mode"] = serviceMode;
+  respuesta["device_mode"] = deviceModeToString(currentDeviceMode);
+
+  String body;
+  serializeJson(respuesta, body);
+
+  servidorInstalacion.send(200, "application/json", body);
+
+  Serial.println();
+  Serial.println("✅ MODO SERVICIO FINALIZADO LOCALMENTE");
+}
+
 void responderWifiStatus()
 {
   JsonDocument doc;
@@ -2436,6 +2700,85 @@ void responderGuardarInitialConfig()
   servidorInstalacion.send(200, "application/json", body);
 }
 
+void responderFinalizarInstalacion()
+{
+  if (servidorInstalacion.method() != HTTP_POST)
+  {
+    servidorInstalacion.send(405, "application/json", "{\"success\":false,\"error\":\"METHOD_NOT_ALLOWED\"}");
+    return;
+  }
+
+  if (!installationWifiConfigured && WiFi.status() != WL_CONNECTED)
+  {
+    servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"WIFI_REQUIRED\"}");
+    return;
+  }
+
+  if (!installationWifiConfigured && WiFi.status() == WL_CONNECTED)
+  {
+    installationWifiConfigured = true;
+    installationConnectionVerified = true;
+    installationWifiSsid = WiFi.SSID();
+  }
+
+  if (!installationSensorsAssigned)
+  {
+    servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"SENSORS_REQUIRED\"}");
+    return;
+  }
+
+  if (sensorCamaraAddress.length() == 0 || cantidadSensoresConfigurados == 0)
+  {
+    servidorInstalacion.send(400, "application/json", "{\"success\":false,\"error\":\"CHAMBER_SENSOR_REQUIRED\"}");
+    return;
+  }
+
+  installationCompleted = true;
+  installationStatus = "COMMISSIONED";
+  installationPhase = "completed";
+
+  guardarEstadoInstalacionLocal();
+
+  JsonDocument respuesta;
+  respuesta["success"] = true;
+  respuesta["device_id"] = DEVICE_ID;
+  respuesta["installation_completed"] = installationCompleted;
+  respuesta["installation_status"] = installationStatus;
+  respuesta["installation_phase"] = installationPhase;
+  respuesta["configured"] = true;
+  respuesta["provisioning_status"] = "configured";
+
+  String body;
+  serializeJson(respuesta, body);
+
+  servidorInstalacion.send(200, "application/json", body);
+
+  Serial.println();
+  Serial.println("✅ INSTALACION FINALIZADA LOCALMENTE");
+  Serial.println("✅ Equipo comisionado. Reiniciando para entrar en modo operativo...");
+  delay(1000);
+  ESP.restart();
+}
+
+void registrarRutasApiLocal()
+{
+  servidorInstalacion.on("/api/device-info", HTTP_GET, responderDeviceInfo);
+  servidorInstalacion.on("/api/wifi/scan", HTTP_GET, responderWifiScan);
+  servidorInstalacion.on("/api/wifi/configure", HTTP_POST, responderWifiConfigure);
+  servidorInstalacion.on("/api/wifi/status", HTTP_GET, responderWifiStatus);
+
+  servidorInstalacion.on("/api/install/sensors", HTTP_GET, responderInstallSensors);
+  servidorInstalacion.on("/api/install/sensors", HTTP_POST, responderGuardarInstallSensors);
+  servidorInstalacion.on("/api/install/operation-mode", HTTP_POST, responderGuardarOperationMode);
+  servidorInstalacion.on("/api/install/initial-config", HTTP_POST, responderGuardarInitialConfig);
+  servidorInstalacion.on("/api/install/finish", HTTP_POST, responderFinalizarInstalacion);
+
+  servidorInstalacion.on("/api/service/start", HTTP_POST, responderIniciarModoServicio);
+  servidorInstalacion.on("/api/service/finish", HTTP_POST, responderFinalizarModoServicio);
+
+  servidorInstalacion.on("/api/factory-reset", HTTP_POST, responderFactoryReset);
+}
+
 void iniciarModoInstalacionLocal()
 {
   String nombreAP = DEVICE_ID;
@@ -2475,15 +2818,7 @@ void iniciarModoInstalacionLocal()
   Serial.print("IP AP: ");
   Serial.println(WiFi.softAPIP());
 
-  servidorInstalacion.on("/api/device-info", HTTP_GET, responderDeviceInfo);
-  servidorInstalacion.on("/api/wifi/scan", HTTP_GET, responderWifiScan);
-  servidorInstalacion.on("/api/wifi/configure", HTTP_POST, responderWifiConfigure);
-  servidorInstalacion.on("/api/wifi/status", HTTP_GET, responderWifiStatus);
-  servidorInstalacion.on("/api/install/sensors", HTTP_GET, responderInstallSensors);
-  servidorInstalacion.on("/api/install/sensors", HTTP_POST, responderGuardarInstallSensors);
-  servidorInstalacion.on("/api/install/operation-mode", HTTP_POST, responderGuardarOperationMode);
-  servidorInstalacion.on("/api/install/initial-config", HTTP_POST, responderGuardarInitialConfig);
-  servidorInstalacion.on("/api/factory-reset", HTTP_POST, responderFactoryReset);
+  registrarRutasApiLocal();
 
   servidorInstalacion.begin();
 
@@ -2528,21 +2863,95 @@ void iniciarModoInstalacionLocalConWifiCliente()
   Serial.print("IP AP: ");
   Serial.println(WiFi.softAPIP());
 
-  servidorInstalacion.on("/api/device-info", HTTP_GET, responderDeviceInfo);
-  servidorInstalacion.on("/api/wifi/scan", HTTP_GET, responderWifiScan);
-  servidorInstalacion.on("/api/wifi/configure", HTTP_POST, responderWifiConfigure);
-  servidorInstalacion.on("/api/wifi/status", HTTP_GET, responderWifiStatus);
-  servidorInstalacion.on("/api/install/sensors", HTTP_GET, responderInstallSensors);
-  servidorInstalacion.on("/api/install/sensors", HTTP_POST, responderGuardarInstallSensors);
-  servidorInstalacion.on("/api/install/operation-mode", HTTP_POST, responderGuardarOperationMode);
-  servidorInstalacion.on("/api/install/initial-config", HTTP_POST, responderGuardarInitialConfig);
-  servidorInstalacion.on("/api/factory-reset", HTTP_POST, responderFactoryReset);
+  registrarRutasApiLocal();
 
   servidorInstalacion.begin();
 
   modoInstalacionLocalActivo = true;
 
   Serial.println("✅ API local de instalacion activa con WiFi cliente conectado");
+}
+
+void iniciarModoServicioLocal()
+{
+  String nombreAP = "SmartCold-Service-" + HARDWARE_UID;
+
+  Serial.println("🛠️ Iniciando modo servicio local SmartCold...");
+  Serial.print("AP servicio: ");
+  Serial.println(nombreAP);
+
+  WiFi.mode(WIFI_AP_STA);
+  delay(500);
+
+  IPAddress localIp(192, 168, 4, 1);
+  IPAddress gateway(192, 168, 4, 1);
+  IPAddress subnet(255, 255, 255, 0);
+
+  WiFi.softAPConfig(localIp, gateway, subnet);
+
+  bool apOk = WiFi.softAP(
+      nombreAP.c_str(),
+      nullptr,
+      6,
+      false,
+      4);
+
+  if (!apOk)
+  {
+    Serial.println("❌ ERROR iniciando AP de servicio SmartCold");
+    return;
+  }
+
+  registrarRutasApiLocal();
+  servidorInstalacion.begin();
+
+  modoInstalacionLocalActivo = true;
+  serviceMode = true;
+  currentDeviceMode = calcularDeviceMode();
+  guardarEstadoInstalacionLocal();
+
+  Serial.print("✅ AP servicio iniciado: ");
+  Serial.println(WiFi.softAPSSID());
+  Serial.print("IP AP servicio: ");
+  Serial.println(WiFi.softAPIP());
+  Serial.println("✅ API local de servicio activa");
+}
+
+void finalizarModoServicioLocal()
+{
+  Serial.println("✅ Finalizando modo servicio local SmartCold...");
+
+  servidorInstalacion.stop();
+  delay(200);
+
+  WiFi.softAPdisconnect(true);
+  delay(300);
+
+  modoInstalacionLocalActivo = false;
+  serviceMode = false;
+  currentDeviceMode = calcularDeviceMode();
+
+  guardarEstadoInstalacionLocal();
+
+  Serial.print("Device mode: ");
+  Serial.println(deviceModeToString(currentDeviceMode));
+  Serial.println("✅ API/AP de servicio detenidos.");
+}
+
+void manejarFalloConexionWiFi()
+{
+  Serial.println();
+
+  if (installationCompleted)
+  {
+    Serial.println("⚠️ Equipo comisionado sin WiFi conectado.");
+    Serial.println("⚠️ Manteniendo operacion local con configuracion guardada.");
+    Serial.println("⚠️ No se inicia modo instalacion.");
+    return;
+  }
+
+  Serial.println("⚙️ Sin WiFi guardado. Entrando en modo instalacion local.");
+  iniciarModoInstalacionLocal();
 }
 
 void setup()
@@ -2566,6 +2975,7 @@ void setup()
 
   preferences.begin("smartcold", false);
   cargarEstadoInstalacionLocal();
+  currentDeviceMode = calcularDeviceMode();
   Serial.println();
   Serial.println("===== ESTADO INSTALACION =====");
 
@@ -2583,6 +2993,9 @@ void setup()
 
   Serial.print("Completed: ");
   Serial.println(installationCompleted ? "SI" : "NO");
+
+  Serial.print("Device mode: ");
+  Serial.println(deviceModeToString(currentDeviceMode));
 
   Serial.println("==============================");
   Serial.println();
@@ -2723,9 +3136,7 @@ void setup()
   }
   else
   {
-    Serial.println();
-    Serial.println("⚙️ Sin WiFi guardado. Entrando en modo instalacion local.");
-    iniciarModoInstalacionLocal();
+    manejarFalloConexionWiFi();
   }
 
   if (installationCompleted)
@@ -2834,9 +3245,29 @@ void loop()
     if (millis() - ultimaLecturaInstalacion >= 30000)
     {
       ultimaLecturaInstalacion = millis();
-      Serial.println("⚙️ Modo instalacion local activo. AP/API esperando app.");
+      if (serviceMode)
+      {
+        Serial.println("🛠️ Modo servicio activo. AP/API esperando tecnico.");
+      }
+      else
+      {
+        Serial.println("⚙️ Modo instalacion local activo. AP/API esperando app.");
+      }
     }
+    if (serviceMode && installationCompleted)
+    {
+      static unsigned long ultimaTelemetriaServicio = 0;
 
+      if (millis() - ultimaTelemetriaServicio >= 10000)
+      {
+        ultimaTelemetriaServicio = millis();
+
+        leerTemperaturasDS18B20();
+        evaluarAlarmasSensores();
+        calcularControlCompresorLocal();
+        enviarTelemetria();
+      }
+    }
     delay(10);
     return;
   }

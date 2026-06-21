@@ -1487,11 +1487,25 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
         ),
       );
 
-      if (response.statusCode != 200) return;
+      if (response.statusCode != 200) {
+        if (mounted) {
+          setState(() {
+            _configSummaryLoaded = true;
+          });
+        }
+        return;
+      }
 
       final body = jsonDecode(response.body);
 
-      if (body['success'] != true) return;
+      if (body['success'] != true) {
+        if (mounted) {
+          setState(() {
+            _configSummaryLoaded = true;
+          });
+        }
+        return;
+      }
 
       if (!mounted) return;
 
@@ -1517,7 +1531,11 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
         _configSummaryLoaded = true;
       });
     } catch (_) {
-      // Sin bloqueo visual si la API no responde.
+      if (mounted) {
+        setState(() {
+          _configSummaryLoaded = true;
+        });
+      }
     }
   }
 
@@ -1526,7 +1544,9 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
     final statusRef = FirebaseFirestore.instance
         .collection('device_status')
         .doc(widget.deviceId);
-
+    final configRef = FirebaseFirestore.instance
+        .collection('device_config')
+        .doc(widget.deviceId);
     return Scaffold(
       backgroundColor: const Color(0xFF020B14),
       body: Container(
@@ -1563,7 +1583,11 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
                   child: Text('No existe estado para ${widget.deviceId}'),
                 );
               }
+              final serviceMode = data['service_mode'] == true;
 
+              if (serviceMode) {
+                return _ServiceModeNotice(deviceId: widget.deviceId);
+              }
               final lastConfigAckAt = data['last_config_ack_at']?.toString();
 
               if (lastConfigAckAt != null) {
@@ -1585,9 +1609,11 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
               final visibleCoolingLevel =
                   _selectedCoolingLevel ?? savedCoolingLevel;
 
-              final setpoint = _configSetpoint ?? 0.0;
-              final turnOnTemp = _configTurnOnTemp ?? 0.0;
-              final turnOffTemp = _configTurnOffTemp ?? 0.0;
+              final previewConfig = _coolingConfigForLevel(visibleCoolingLevel);
+
+              final setpoint = previewConfig['setpoint']!;
+              final turnOnTemp = previewConfig['turn_on_temperature']!;
+              final turnOffTemp = previewConfig['turn_off_temperature']!;
 
               final secondsSinceLastSeen = _secondsSinceLastSeen(
                 data['last_seen_at'],
@@ -1600,303 +1626,304 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
               final chamberTemp = _sensorValue(data, 'chamber');
               final evaporatorTemp = _sensorValue(data, 'evaporator');
 
-              return Column(
-                children: [
-                  Expanded(
-                    child: ListView(
-                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
-                      children: [
-                        _TopBar(
-                          connectionStatus: connectionStatus,
-                          rssi: data['rssi'],
-                        ),
-                        const SizedBox(height: 14),
+              return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                stream: configRef.snapshots(),
+                builder: (context, configSnapshot) {
+                  final configData = configSnapshot.data?.data() ?? {};
+                  final defrostConfig = configData['defrost'];
 
-                        _HeroPanel(
-                          deviceName:
-                              data['device_name'] ??
-                              data['name'] ??
-                              widget.deviceId,
-                          health: data['device_health'],
-                          healthReason: data['device_health_reason'],
-                          state: data['device_state'],
-                          online: connectionStatus != 'offline',
-                          rssi: data['rssi'],
-                          compressorOn: data['compressor_relay_on'],
-                          blockReason: data['compressor_block_reason'],
-                        ),
+                  final defrostEnabled =
+                      defrostConfig is Map && defrostConfig['enabled'] == true;
+                  final dripTimeSeconds = defrostConfig is Map
+                      ? int.tryParse(
+                              defrostConfig['drip_time_seconds']?.toString() ??
+                                  '',
+                            ) ??
+                            0
+                      : 0;
 
-                        const SizedBox(height: 8),
+                  final dripEnabled = defrostEnabled && dripTimeSeconds > 0;
+                  return Column(
+                    children: [
+                      Expanded(
+                        child: ListView(
+                          padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
+                          children: [
+                            _TopBar(
+                              connectionStatus: connectionStatus,
+                              rssi: data['rssi'],
+                            ),
+                            const SizedBox(height: 14),
 
-                        _CoolingLevelDial(
-                          level: visibleCoolingLevel,
-                          setpoint: setpoint,
-                          turnOnTemp: turnOnTemp,
-                          turnOffTemp: turnOffTemp,
-                          unlocked: _dialUnlocked,
-                          onUnlockChanged: (value) {
-                            setState(() {
-                              if (value) {
-                                _levelBeforeEdit = visibleCoolingLevel;
-                                _dialUnlocked = true;
-                                return;
-                              }
+                            _HeroPanel(
+                              deviceName:
+                                  data['device_name'] ??
+                                  data['name'] ??
+                                  widget.deviceId,
+                              health: data['device_health'],
+                              healthReason: data['device_health_reason'],
+                              state: data['device_state'],
+                              online: connectionStatus != 'offline',
+                              rssi: data['rssi'],
+                              compressorOn: data['compressor_relay_on'],
+                              blockReason: data['compressor_block_reason'],
+                            ),
 
-                              _selectedCoolingLevel = _levelBeforeEdit;
-                              _levelBeforeEdit = null;
-                              _dialUnlocked = false;
-                            });
-                          },
-                          onLevelChanged: (newLevel) {
-                            if (!_dialUnlocked) return;
+                            const SizedBox(height: 8),
 
-                            setState(() {
-                              _selectedCoolingLevel = newLevel;
-                            });
-                          },
-                        ),
-
-                        if (_dialUnlocked &&
-                            _selectedCoolingLevel != null &&
-                            _levelBeforeEdit != null &&
-                            _selectedCoolingLevel != _levelBeforeEdit) ...[
-                          const SizedBox(height: 8),
-                          SizedBox(
-                            width: double.infinity,
-                            child: ElevatedButton.icon(
-                              onPressed: () async {
-                                final levelToSave = _selectedCoolingLevel;
-
-                                if (levelToSave == null) return;
-
-                                try {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text('Guardando ajuste...'),
-                                      duration: Duration(seconds: 1),
-                                    ),
-                                  );
-
-                                  final response = await http.post(
-                                    Uri.parse(
-                                      'https://smartcold-api-649501100610.us-central1.run.app/api/devices/${widget.deviceId}/cooling-level',
-                                    ),
-                                    headers: {
-                                      'Content-Type': 'application/json',
-                                    },
-                                    body: jsonEncode({
-                                      'cooling_level': levelToSave,
-                                    }),
-                                  );
-
-                                  final body = jsonDecode(response.body);
-
-                                  if (response.statusCode != 200 ||
-                                      body['success'] != true) {
-                                    throw Exception(
-                                      body['message'] ??
-                                          'No se pudo guardar el ajuste',
-                                    );
+                            _CoolingLevelDial(
+                              level: visibleCoolingLevel,
+                              setpoint: setpoint,
+                              turnOnTemp: turnOnTemp,
+                              turnOffTemp: turnOffTemp,
+                              unlocked: _dialUnlocked,
+                              onUnlockChanged: (value) {
+                                setState(() {
+                                  if (value) {
+                                    _levelBeforeEdit = visibleCoolingLevel;
+                                    _dialUnlocked = true;
+                                    return;
                                   }
 
-                                  if (!context.mounted) return;
-
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                      content: Text(
-                                        'Nivel $levelToSave guardado',
-                                      ),
-                                      duration: const Duration(seconds: 2),
-                                    ),
-                                  );
-                                  setState(() {
-                                    _configCoolingLevel =
-                                        _intFromDynamic(
-                                          body['cooling_level'],
-                                        ) ??
-                                        levelToSave;
-
-                                    _configSetpoint =
-                                        _doubleFromDynamic(body['setpoint']) ??
-                                        _configSetpoint;
-
-                                    _configTurnOnTemp =
-                                        _doubleFromDynamic(
-                                          body['turn_on_temperature'],
-                                        ) ??
-                                        _configTurnOnTemp;
-
-                                    _configTurnOffTemp =
-                                        _doubleFromDynamic(
-                                          body['turn_off_temperature'],
-                                        ) ??
-                                        _configTurnOffTemp;
-
-                                    _selectedCoolingLevel = null;
-                                    _levelBeforeEdit = null;
-                                    _dialUnlocked = false;
-                                  });
-
-                                  await _loadConfigSummary();
-                                } catch (e) {
-                                  if (!context.mounted) return;
-
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                      content: Text('Error guardando: $e'),
-                                      duration: const Duration(seconds: 4),
-                                    ),
-                                  );
-                                }
+                                  _selectedCoolingLevel = _levelBeforeEdit;
+                                  _levelBeforeEdit = null;
+                                  _dialUnlocked = false;
+                                });
                               },
-                              icon: const Icon(Icons.save_rounded),
-                              label: const Text('Guardar ajuste'),
+                              onLevelChanged: (newLevel) {
+                                if (!_dialUnlocked) return;
+
+                                setState(() {
+                                  _selectedCoolingLevel = newLevel;
+                                });
+                              },
                             ),
-                          ),
-                        ],
 
-                        const SizedBox(height: 18),
+                            if (_dialUnlocked &&
+                                _selectedCoolingLevel != null &&
+                                _levelBeforeEdit != null &&
+                                _selectedCoolingLevel != _levelBeforeEdit) ...[
+                              const SizedBox(height: 8),
+                              SizedBox(
+                                width: double.infinity,
+                                child: ElevatedButton.icon(
+                                  onPressed: () async {
+                                    final levelToSave = _selectedCoolingLevel;
 
-                        LayoutBuilder(
-                          builder: (context, constraints) {
-                            return GridView.count(
-                              shrinkWrap: true,
-                              physics: const NeverScrollableScrollPhysics(),
-                              crossAxisCount: 3,
-                              crossAxisSpacing: 8,
-                              mainAxisSpacing: 8,
-                              childAspectRatio: constraints.maxWidth < 430
-                                  ? 0.95
-                                  : 1.25,
-                              children: [
-                                _KpiCard(
-                                  title: 'Cámara',
-                                  value: chamberTemp,
-                                  suffix: '°C',
-                                  icon: Icons.thermostat_rounded,
-                                  badgeText: _sensorAlarmText(data, 'chamber'),
-                                  accent: const Color(0xFF1EA7FF),
+                                    if (levelToSave == null) return;
+
+                                    try {
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        const SnackBar(
+                                          content: Text('Guardando ajuste...'),
+                                          duration: Duration(seconds: 1),
+                                        ),
+                                      );
+
+                                      final response = await http.post(
+                                        Uri.parse(
+                                          'https://smartcold-api-649501100610.us-central1.run.app/api/devices/${widget.deviceId}/cooling-level',
+                                        ),
+                                        headers: {
+                                          'Content-Type': 'application/json',
+                                        },
+                                        body: jsonEncode({
+                                          'cooling_level': levelToSave,
+                                        }),
+                                      );
+
+                                      final body = jsonDecode(response.body);
+
+                                      if (response.statusCode != 200 ||
+                                          body['success'] != true) {
+                                        throw Exception(
+                                          body['message'] ??
+                                              'No se pudo guardar el ajuste',
+                                        );
+                                      }
+
+                                      if (!context.mounted) return;
+
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        SnackBar(
+                                          content: Text(
+                                            'Nivel $levelToSave guardado',
+                                          ),
+                                          duration: const Duration(seconds: 2),
+                                        ),
+                                      );
+                                      setState(() {
+                                        _configCoolingLevel =
+                                            _intFromDynamic(
+                                              body['cooling_level'],
+                                            ) ??
+                                            levelToSave;
+
+                                        _configSetpoint =
+                                            _doubleFromDynamic(
+                                              body['setpoint'],
+                                            ) ??
+                                            _configSetpoint;
+
+                                        _configTurnOnTemp =
+                                            _doubleFromDynamic(
+                                              body['turn_on_temperature'],
+                                            ) ??
+                                            _configTurnOnTemp;
+
+                                        _configTurnOffTemp =
+                                            _doubleFromDynamic(
+                                              body['turn_off_temperature'],
+                                            ) ??
+                                            _configTurnOffTemp;
+
+                                        _selectedCoolingLevel = null;
+                                        _levelBeforeEdit = null;
+                                        _dialUnlocked = false;
+                                      });
+
+                                      await _loadConfigSummary();
+                                    } catch (e) {
+                                      if (!context.mounted) return;
+
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        SnackBar(
+                                          content: Text('Error guardando: $e'),
+                                          duration: const Duration(seconds: 4),
+                                        ),
+                                      );
+                                    }
+                                  },
+                                  icon: const Icon(Icons.save_rounded),
+                                  label: const Text('Guardar ajuste'),
                                 ),
-                                _KpiCard(
-                                  title: 'Evaporador',
-                                  value: evaporatorTemp,
-                                  suffix: '°C',
-                                  icon: Icons.ac_unit_rounded,
-                                  badgeText: _sensorAlarmText(
-                                    data,
-                                    'evaporator',
-                                  ),
-                                  accent: const Color(0xFF21B9FF),
-                                ),
-                                _MiniCompressorKpi(
-                                  relayOn: data['compressor_relay_on'],
-                                  shouldBeOn: data['compressor_should_be_on'],
-                                  protectionSeconds:
-                                      data['compressor_wait_seconds_remaining'],
-                                  connectionStatus: connectionStatus,
-                                  secondsSinceLastSeen: secondsSinceLastSeen,
-                                ),
-                              ],
-                            );
-                          },
-                        ),
+                              ),
+                            ],
 
-                        if (data['defrost_enabled'] == true ||
-                            ((int.tryParse(
-                                      data['drip_time_seconds']?.toString() ??
-                                          '',
-                                    ) ??
-                                    0) >
-                                0)) ...[
-                          const SizedBox(height: 12),
+                            const SizedBox(height: 18),
 
-                          LayoutBuilder(
-                            builder: (context, constraints) {
-                              final defrostEnabled =
-                                  data['defrost_enabled'] == true;
-
-                              final dripEnabled =
-                                  (int.tryParse(
-                                        data['drip_time_seconds']?.toString() ??
-                                            '',
-                                      ) ??
-                                      0) >
-                                  0;
-
-                              final cards = <Widget>[];
-
-                              if (defrostEnabled) {
-                                cards.add(
-                                  Expanded(
-                                    child: _DefrostCard(
-                                      active: data['defrost_active'],
-                                      evaporatorTemp: evaporatorTemp,
-                                      chamberTemp: chamberTemp,
-                                      endTemperature:
-                                          data['defrost_end_temperature'],
-                                      remainingSeconds:
-                                          data['defrost_remaining_seconds'],
-                                      nextSeconds: data['defrost_next_seconds'],
-                                      durationMinutes:
-                                          data['defrost_duration_minutes'],
-                                      intervalMinutes:
-                                          data['defrost_interval_minutes'],
+                            LayoutBuilder(
+                              builder: (context, constraints) {
+                                return GridView.count(
+                                  shrinkWrap: true,
+                                  physics: const NeverScrollableScrollPhysics(),
+                                  crossAxisCount: 3,
+                                  crossAxisSpacing: 8,
+                                  mainAxisSpacing: 8,
+                                  childAspectRatio: constraints.maxWidth < 430
+                                      ? 0.95
+                                      : 1.25,
+                                  children: [
+                                    _KpiCard(
+                                      title: 'Cámara',
+                                      value: chamberTemp,
+                                      suffix: '°C',
+                                      icon: Icons.thermostat_rounded,
+                                      badgeText: _sensorAlarmText(
+                                        data,
+                                        'chamber',
+                                      ),
+                                      accent: const Color(0xFF1EA7FF),
+                                    ),
+                                    _KpiCard(
+                                      title: 'Evaporador',
+                                      value: evaporatorTemp,
+                                      suffix: '°C',
+                                      icon: Icons.ac_unit_rounded,
+                                      badgeText: _sensorAlarmText(
+                                        data,
+                                        'evaporator',
+                                      ),
+                                      accent: const Color(0xFF21B9FF),
+                                    ),
+                                    _MiniCompressorKpi(
+                                      relayOn: data['compressor_relay_on'],
+                                      shouldBeOn:
+                                          data['compressor_should_be_on'],
+                                      protectionSeconds:
+                                          data['compressor_wait_seconds_remaining'],
                                       connectionStatus: connectionStatus,
                                       secondsSinceLastSeen:
                                           secondsSinceLastSeen,
                                     ),
-                                  ),
+                                  ],
                                 );
-                              }
+                              },
+                            ),
+                            if (defrostEnabled || dripEnabled) ...[
+                              const SizedBox(height: 12),
 
-                              if (defrostEnabled && dripEnabled) {
-                                cards.add(const SizedBox(width: 8));
-                              }
-
-                              if (dripEnabled) {
-                                cards.add(
-                                  Expanded(
-                                    child: _DripCard(
-                                      active: data['drip_active'],
-                                      configuredSeconds:
-                                          data['drip_time_seconds'],
-                                      remainingSeconds:
-                                          data['drip_remaining_seconds'],
-                                      connectionStatus: connectionStatus,
-                                      secondsSinceLastSeen:
-                                          secondsSinceLastSeen,
-                                    ),
-                                  ),
-                                );
-                              }
-
-                              return IntrinsicHeight(
+                              IntrinsicHeight(
                                 child: Row(
                                   crossAxisAlignment:
                                       CrossAxisAlignment.stretch,
-                                  children: cards,
-                                ),
-                              );
-                            },
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
+                                  children: [
+                                    if (defrostEnabled)
+                                      Expanded(
+                                        child: _DefrostCard(
+                                          active: data['defrost_active'],
+                                          evaporatorTemp: evaporatorTemp,
+                                          chamberTemp: chamberTemp,
+                                          endTemperature:
+                                              defrostConfig['end_temperature'],
+                                          remainingSeconds:
+                                              data['defrost_remaining_seconds'],
+                                          nextSeconds:
+                                              data['defrost_next_seconds'],
+                                          durationMinutes:
+                                              defrostConfig['duration_minutes'],
+                                          intervalMinutes:
+                                              defrostConfig['interval_minutes'],
+                                          connectionStatus: connectionStatus,
+                                          secondsSinceLastSeen:
+                                              secondsSinceLastSeen,
+                                        ),
+                                      ),
 
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: Text(
-                      lastUpdateText,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        color: Color(0xFF9DB0C1),
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
+                                    if (defrostEnabled && dripEnabled)
+                                      const SizedBox(width: 8),
+
+                                    if (dripEnabled)
+                                      Expanded(
+                                        child: _DripCard(
+                                          active: data['drip_active'],
+                                          configuredSeconds: dripTimeSeconds,
+                                          remainingSeconds:
+                                              data['drip_remaining_seconds'],
+                                          connectionStatus: connectionStatus,
+                                          secondsSinceLastSeen:
+                                              secondsSinceLastSeen,
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
                       ),
-                    ),
-                  ),
-                ],
+
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: Text(
+                          lastUpdateText,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: Color(0xFF9DB0C1),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                },
               );
             },
           ),
@@ -1982,6 +2009,29 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
     return double.tryParse(value.toString());
   }
 
+  Map<String, double> _coolingConfigForLevel(int level) {
+    final safeLevel = level.clamp(1, 7);
+
+    final setpoints = <int, double>{
+      1: 7.0,
+      2: 6.0,
+      3: 5.0,
+      4: 4.0,
+      5: 3.0,
+      6: 2.0,
+      7: 1.0,
+    };
+
+    final setpoint = setpoints[safeLevel] ?? 4.0;
+    const differential = 2.0;
+
+    return {
+      'setpoint': setpoint,
+      'turn_on_temperature': setpoint + differential,
+      'turn_off_temperature': setpoint,
+    };
+  }
+
   static dynamic _sensorValue(Map<String, dynamic> data, String role) {
     final readings = data['sensor_readings'];
     if (readings is Map && readings.containsKey(role)) {
@@ -2003,6 +2053,67 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
       }
     }
     return 'NORMAL';
+  }
+}
+
+class _ServiceModeNotice extends StatelessWidget {
+  const _ServiceModeNotice({required this.deviceId});
+
+  final String deviceId;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(22),
+        child: Card(
+          color: const Color(0xFF061A2E),
+          child: Padding(
+            padding: const EdgeInsets.all(22),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(
+                  Icons.engineering_rounded,
+                  color: Colors.orangeAccent,
+                  size: 58,
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Equipo en mantenimiento técnico',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 21,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  deviceId,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Color(0xFF9DB0C1),
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                const Text(
+                  'El equipo está siendo intervenido por un técnico autorizado. '
+                  'Durante el mantenimiento la vista normal queda temporalmente deshabilitada.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Color(0xFFB6C7D6),
+                    fontSize: 14,
+                    height: 1.35,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -2038,9 +2149,7 @@ class _TopBar extends StatelessWidget {
             color: Colors.white,
             size: 30,
           ),
-          onPressed: () {
-            Navigator.of(context).pop();
-          },
+          onPressed: () => Navigator.of(context).pop(),
         ),
         const SizedBox(width: 14),
         Container(
@@ -2076,6 +2185,7 @@ class _TopBar extends StatelessWidget {
             ),
           ),
         ),
+        const SizedBox(width: 6),
         Column(
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
@@ -2085,7 +2195,7 @@ class _TopBar extends StatelessWidget {
                 Icon(Icons.circle, color: color, size: 10),
                 const SizedBox(width: 5),
                 Text(
-                  label,
+                  label == 'SIN ACTUALIZAR' ? 'LENTO' : label,
                   style: const TextStyle(
                     color: Colors.white,
                     fontWeight: FontWeight.w800,
@@ -4506,6 +4616,86 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
     );
   }
 
+  Future<void> _finishInstallation() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Finalizar instalación'),
+          content: const Text(
+            '¿Confirmas que el equipo fue probado y está listo para operar?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancelar'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Finalizar'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirm != true) return;
+
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+
+    try {
+      final response = await http
+          .post(Uri.parse('$_espBaseUrl/api/install/finish'))
+          .timeout(const Duration(seconds: 12));
+
+      final data = jsonDecode(response.body);
+
+      if (response.statusCode != 200 || data['success'] != true) {
+        throw Exception(data['error'] ?? 'No se pudo finalizar instalación');
+      }
+
+      if (!mounted) return;
+
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) {
+          return AlertDialog(
+            title: const Text('Instalación finalizada'),
+            content: const Text(
+              'El equipo quedó comisionado correctamente.\n\n'
+              'El ESP se reiniciará y entrará en modo operativo.',
+            ),
+            actions: [
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Aceptar'),
+              ),
+            ],
+          );
+        },
+      );
+
+      if (!mounted) return;
+      Navigator.pop(context);
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _error = 'Error finalizando instalación: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+        });
+      }
+    }
+  }
+
   Future<void> _sendInitialConfiguration(Map<String, dynamic> config) async {
     setState(() {
       _loading = true;
@@ -4646,6 +4836,21 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
                     _deviceInfo?['sensors_assigned'] != true
                 ? null
                 : _openInstallationTests,
+          ),
+          _InstallationActionCard(
+            number: 5,
+            title: 'Finalizar instalación',
+            subtitle: 'Comisionar el equipo y pasarlo a modo operativo.',
+            completed: _deviceInfo?['installation_completed'] == true,
+            buttonText: 'Finalizar instalación',
+            onPressed:
+                _deviceInfo == null ||
+                    _loading ||
+                    _deviceInfo?['wifi_configured'] != true ||
+                    _deviceInfo?['sensors_assigned'] != true ||
+                    _deviceInfo?['parameters_configured'] != true
+                ? null
+                : _finishInstallation,
           ),
         ],
       ),

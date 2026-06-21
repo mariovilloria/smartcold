@@ -1,7 +1,7 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 import firebase_admin
 from firebase_admin import credentials, firestore
 import os
@@ -64,15 +64,10 @@ class TelemetryData(BaseModel):
     defrost_elapsed_seconds: int | None = None
     defrost_remaining_seconds: int | None = None
     defrost_next_seconds: int | None = None
-    defrost_interval_minutes: int | None = None
-    defrost_duration_minutes: int | None = None
-    defrost_end_sensor_role: str | None = None
-    defrost_end_temperature: float | None = None
 
     drip_active: bool | None = None
     drip_elapsed_seconds: int | None = None
     drip_remaining_seconds: int | None = None
-    drip_time_seconds: int | None = None
 
     cloud_connected: bool | None = None
     cloud_fail_count: int | None = None
@@ -210,6 +205,259 @@ class CoolingLevelUpdate(BaseModel):
 
 class OperationModeUpdate(BaseModel):
     operation_mode: str
+   
+ 
+# =====================================================
+# SmartCold Contract v1.0
+# =====================================================
+
+class SmartColdCompressorContract(BaseModel):
+    enabled: bool = True
+    control_sensor_role: str = "chamber"
+    setpoint: float
+    differential: float
+    min_off_seconds: int = 180
+    force_off_on_sensor_error: bool = True
+
+
+class SmartColdDefrostContract(BaseModel):
+    enabled: bool = False
+    mode: str = "time_temperature"
+    interval_minutes: int = 360
+    duration_minutes: int = 20
+    end_sensor_role: str = "evaporator"
+    end_temperature: float = 8.0
+    drip_time_seconds: int = 120
+
+
+class SmartColdSensorContract(BaseModel):
+    id: str
+    role: str
+    name: str
+    type: str = "ds18b20"
+    bus: str = "onewire"
+    pin: int = 4
+    address: str
+    enabled: bool = True
+    offset: float = 0.0
+    alarm_enabled: bool = False
+    temp_min_alarm: float = -100.0
+    temp_max_alarm: float = 100.0
+    can_stop_compressor: bool = False
+
+
+class SmartColdOutputItemContract(BaseModel):
+    enabled: bool = False
+    pin: Optional[int] = None
+    active_level: str = "HIGH"
+    name: str
+
+
+class SmartColdOutputsContract(BaseModel):
+    compressor: SmartColdOutputItemContract = SmartColdOutputItemContract(
+        enabled=True,
+        pin=26,
+        active_level="HIGH",
+        name="Salida compresor",
+    )
+    defrost: SmartColdOutputItemContract = SmartColdOutputItemContract(
+        enabled=True,
+        pin=27,
+        active_level="HIGH",
+        name="Salida defrost",
+    )
+    fan: SmartColdOutputItemContract = SmartColdOutputItemContract(
+        enabled=True,
+        pin=14,
+        active_level="HIGH",
+        name="Salida ventilador",
+    )
+    alarm: SmartColdOutputItemContract = SmartColdOutputItemContract(
+        enabled=False,
+        pin=None,
+        active_level="HIGH",
+        name="Salida alarma",
+    )
+
+
+class SmartColdInputItemContract(BaseModel):
+    enabled: bool = False
+    pin: Optional[int] = None
+    normally_closed: bool = True
+    name: str
+
+
+class SmartColdExternalInputContract(SmartColdInputItemContract):
+    can_stop_compressor: bool = False
+    role: str = "external_alarm"
+
+
+class SmartColdInputsContract(BaseModel):
+    door: SmartColdInputItemContract = SmartColdInputItemContract(
+        enabled=False,
+        pin=25,
+        normally_closed=True,
+        name="Entrada puerta",
+    )
+    external: SmartColdExternalInputContract = SmartColdExternalInputContract(
+        enabled=False,
+        pin=33,
+        normally_closed=True,
+        name="Entrada externa",
+        can_stop_compressor=False,
+        role="external_alarm",
+    )
+
+
+class SmartColdSimulationContract(BaseModel):
+    enabled: bool = False
+    scenario: str = "OFF"
+    source: str = "none"
+
+
+class SmartColdSafetyContract(BaseModel):
+    offline_mode: str = "local_control"
+    sensor_error_action: str = "compressor_off"
+    max_compressor_runtime_minutes: int = 0
+
+
+class SmartColdCommissionRequest(BaseModel):
+    device_id: str
+    hardware_uid: str
+    firmware_version: str
+
+    operation_mode: str
+    cooling_level: int = 4
+
+    compressor: SmartColdCompressorContract
+    defrost: SmartColdDefrostContract = SmartColdDefrostContract()
+    sensors: List[SmartColdSensorContract]
+
+    outputs: SmartColdOutputsContract = SmartColdOutputsContract()
+    inputs: SmartColdInputsContract = SmartColdInputsContract()
+    simulation: SmartColdSimulationContract = SmartColdSimulationContract()
+    safety: SmartColdSafetyContract = SmartColdSafetyContract()
+
+    installer_uid: Optional[str] = None
+    configured_wifi_ssid: Optional[str] = None   
+   
+   
+def build_commissioned_device_documents(payload: SmartColdCommissionRequest) -> dict:
+    now = datetime.utcnow().isoformat()
+
+    device_doc = {
+        "device_id": payload.device_id,
+        "hardware_uid": payload.hardware_uid,
+        "name": "Pendiente de asignar",
+        "type": "refrigeration_controller",
+        "active": True,
+        "configured": True,
+        "status": "installed",
+        "provisioning_status": "commissioned",
+        "device_mode": "OPERATION",
+        "service_mode": False,
+        "simulation_enabled": payload.simulation.enabled,
+        "simulation_scenario": payload.simulation.scenario,
+        "current_client_id": None,
+        "current_store_id": None,
+        "current_installation_id": payload.device_id,
+        "firmware_version": payload.firmware_version,
+        "created_at": now,
+        "updated_at": now,
+        "commissioned_at": now,
+        "last_seen_at": now,
+    }
+
+    config_doc = {
+        "device_id": payload.device_id,
+        "operation_mode": payload.operation_mode,
+        "cooling_level": payload.cooling_level,
+        "compressor": payload.compressor.dict(),
+        "defrost": payload.defrost.dict(),
+        "sensors": [sensor.dict() for sensor in payload.sensors],
+        "outputs": payload.outputs.dict(),
+        "inputs": payload.inputs.dict(),
+        "simulation": payload.simulation.dict(),
+        "safety": payload.safety.dict(),
+        "config_version": 1,
+        "config_source": "commissioning",
+        "config_pending": False,
+        "updated_at": now,
+        "last_config_ack_at": None,
+    }
+
+    status_doc = {
+        "device_id": payload.device_id,
+        "hardware_uid": payload.hardware_uid,
+        "online": False,
+        "connection_status": "offline",
+        "configured": True,
+        "provisioning_status": "commissioned",
+        "device_mode": "OPERATION",
+        "service_mode": False,
+        "simulation_enabled": payload.simulation.enabled,
+        "simulation_scenario": payload.simulation.scenario,
+        "device_state": "UNKNOWN",
+        "device_health": "HEALTHY",
+        "device_health_reason": "",
+        "alarm": False,
+        "alarm_reason": "",
+        "temperature": None,
+        "humidity": None,
+        "sensor_readings": {},
+        "sensor_alarms": {},
+        "compressor_relay_on": False,
+        "compressor_should_be_on": False,
+        "compressor_can_turn_on": False,
+        "compressor_block_reason": "NONE",
+        "compressor_block_reasons": [],
+        "compressor_wait_seconds_remaining": 0,
+        "compressor_runtime_since_defrost_seconds": 0,
+        "defrost_active": False,
+        "defrost_elapsed_seconds": 0,
+        "defrost_remaining_seconds": 0,
+        "defrost_next_seconds": 0,
+        "drip_active": False,
+        "drip_elapsed_seconds": 0,
+        "drip_remaining_seconds": 0,
+        "detected_sensors": [],
+        "firmware_version": payload.firmware_version,
+        "rssi": None,
+        "timestamp": now,
+        "last_seen_at": now,
+        "updated_at": now,
+        "seconds_since_last_seen": 0,
+    }
+
+    installation_doc = {
+        "installation_id": payload.device_id,
+        "device_id": payload.device_id,
+        "hardware_uid": payload.hardware_uid,
+        "status": "completed",
+        "phase": "completed",
+        "completed": True,
+        "installer_uid": payload.installer_uid,
+        "wifi_configured": True,
+        "connection_verified": True,
+        "configured_wifi_ssid": payload.configured_wifi_ssid,
+        "sensors_detected": len(payload.sensors) > 0,
+        "sensors_assigned": len(payload.sensors) > 0,
+        "detected_sensors": [sensor.address for sensor in payload.sensors],
+        "parameters_configured": True,
+        "tests_completed": True,
+        "device_mode_after_finish": "OPERATION",
+        "service_mode": False,
+        "created_at": now,
+        "updated_at": now,
+        "completed_at": now,
+    }
+
+    return {
+        "device": device_doc,
+        "device_config": config_doc,
+        "device_status": status_doc,
+        "installation": installation_doc,
+    }   
     
 # =====================================
 # RUTAS BASICAS
@@ -455,14 +703,9 @@ def receive_telemetry(data: TelemetryData):
         "defrost_elapsed_seconds": data.defrost_elapsed_seconds,
         "defrost_remaining_seconds": data.defrost_remaining_seconds,
         "defrost_next_seconds": data.defrost_next_seconds,
-        "defrost_interval_minutes": data.defrost_interval_minutes,
-        "defrost_duration_minutes": data.defrost_duration_minutes,
-        "defrost_end_sensor_role": data.defrost_end_sensor_role,
-        "defrost_end_temperature": data.defrost_end_temperature,
         "drip_active": data.drip_active,
         "drip_elapsed_seconds": data.drip_elapsed_seconds,
         "drip_remaining_seconds": data.drip_remaining_seconds,
-        "drip_time_seconds": data.drip_time_seconds,
         "detected_sensors": data.detected_sensors,
         "sensor_readings": data.sensor_readings,
         "sensor_alarms": data.sensor_alarms,
@@ -492,10 +735,16 @@ def receive_telemetry(data: TelemetryData):
     config_data = config_doc.to_dict() if config_doc.exists else {}
     config_pending = bool(config_data.get("config_pending", False))
 
+    device_doc = db.collection("devices").document(data.device_id).get()
+    device_data = device_doc.to_dict() if device_doc.exists else {}
+
+    service_mode = bool(device_data.get("service_mode", False))
+
     return {
         "success": True,
         "message": "Telemetry received",
         "config_pending": config_pending,
+        "service_mode": service_mode,
     }
 
 
@@ -1093,14 +1342,14 @@ def update_device_cooling_level(device_id: str, data: CoolingLevelUpdate):
     update_data = {
         "device_id": device_id,
         "config_version": config.get("config_version", 1),
-        "operation_mode": data.operation_mode,
-        "cooling_level": cooling_level,
-        "config_source": "installation_step_3",
-        "config_pending": False,
+        "operation_mode": operation_mode,
+        "cooling_level": data.cooling_level,
+        "config_source": "dashboard_cooling_level",
+        "config_pending": True,
         "updated_at": now_iso,
         "last_config_ack_at": config.get("last_config_ack_at"),
         "compressor": compressor,
-        "sensors": config.get("sensors", []),
+        "sensors": sensors,
     }
 
     config_ref.set(update_data, merge=True)
@@ -1117,4 +1366,25 @@ def update_device_cooling_level(device_id: str, data: CoolingLevelUpdate):
         "temp_max_alarm": temp_max_alarm,
         "temp_min_alarm": temp_min_alarm,
         "config_pending": True,
+    }
+
+@app.post("/api/devices/{device_id}/commission")
+def commission_device(device_id: str, payload: SmartColdCommissionRequest):
+    if device_id != payload.device_id:
+        raise HTTPException(
+            status_code=400,
+            detail="DEVICE_ID_MISMATCH",
+        )
+
+    docs = build_commissioned_device_documents(payload)
+
+    db.collection("devices").document(device_id).set(docs["device"], merge=True)
+    db.collection("device_config").document(device_id).set(docs["device_config"], merge=True)
+    db.collection("device_status").document(device_id).set(docs["device_status"], merge=True)
+    db.collection("installations").document(device_id).set(docs["installation"], merge=True)
+
+    return {
+        "success": True,
+        "device_id": device_id,
+        "message": "Device commissioned successfully",
     }
