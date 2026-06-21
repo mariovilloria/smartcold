@@ -733,18 +733,17 @@ def receive_telemetry(data: TelemetryData):
 
     config_doc = db.collection("device_config").document(data.device_id).get()
     config_data = config_doc.to_dict() if config_doc.exists else {}
+
     config_pending = bool(config_data.get("config_pending", False))
-
-    device_doc = db.collection("devices").document(data.device_id).get()
-    device_data = device_doc.to_dict() if device_doc.exists else {}
-
-    service_mode = bool(device_data.get("service_mode", False))
+    requested_service_mode = bool(
+        config_data.get("requested_service_mode", False)
+    )
 
     return {
         "success": True,
         "message": "Telemetry received",
         "config_pending": config_pending,
-        "service_mode": service_mode,
+        "service_mode": requested_service_mode,
     }
 
 

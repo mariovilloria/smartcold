@@ -1040,6 +1040,9 @@ class _DeviceSummaryCard extends StatelessWidget {
 
         final state = statusData?['device_state']?.toString() ?? 'SIN DATOS';
         final health = statusData?['device_health']?.toString() ?? 'UNKNOWN';
+        final serviceMode =
+            statusData?['service_mode'] == true ||
+            statusData?['device_mode']?.toString() == 'SERVICE';
         final healthReason =
             statusData?['device_health_reason']?.toString() ?? '';
         final chamberTemp = _readSensor(statusData, 'chamber');
@@ -1048,8 +1051,11 @@ class _DeviceSummaryCard extends StatelessWidget {
 
         final isOffline = connection == 'offline';
         final hasWarning = health == 'WARNING' || health == 'ERROR';
+        final displayState = serviceMode ? 'MANTENIMIENTO' : _stateLabel(state);
 
-        final color = isOffline
+        final color = serviceMode
+            ? Colors.orangeAccent
+            : isOffline
             ? Colors.redAccent
             : hasWarning
             ? Colors.orangeAccent
@@ -1132,7 +1138,7 @@ class _DeviceSummaryCard extends StatelessWidget {
                       Expanded(
                         child: _SmallStatusBox(
                           label: 'Estado',
-                          value: _stateLabel(state),
+                          value: displayState,
                           color: color,
                         ),
                       ),

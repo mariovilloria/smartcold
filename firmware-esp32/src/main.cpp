@@ -3126,6 +3126,13 @@ void setup()
     if (installationCompleted)
     {
       descargarConfiguracion();
+
+      if (serviceMode)
+      {
+        Serial.println("🛠️ Equipo en modo servicio al iniciar.");
+        Serial.println("🛠️ Iniciando AP/API local de servicio.");
+        iniciarModoServicioLocal();
+      }
     }
     else
     {
