@@ -7,6 +7,9 @@ import 'package:http/http.dart' as http;
 import 'package:firebase_auth/firebase_auth.dart';
 import 'widgets/operation_progress_dialog.dart';
 import 'firebase_options.dart';
+import 'services/backend_service.dart';
+import 'services/local_esp_service.dart';
+import 'services/smartcold_connection_manager.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -2316,16 +2319,21 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
   String? _currentUserRole;
   bool _serviceModeRequestInProgress = false;
   bool? _pendingServiceModeTarget;
+  Map<String, dynamic>? _localDeviceInfo;
+  bool _localEspAvailable = false;
+  bool _checkingLocalEsp = false;
 
   @override
   void initState() {
     super.initState();
     _loadConfigSummary();
     _loadCurrentUserRole();
+    _refreshLocalEspInfo();
 
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) {
         setState(() {});
+        _refreshLocalEspInfo();
       }
     });
   }
@@ -2354,6 +2362,25 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
       setState(() {
         _currentUserRole = 'client';
       });
+    }
+  }
+
+  Future<void> _refreshLocalEspInfo() async {
+    if (_checkingLocalEsp) return;
+
+    _checkingLocalEsp = true;
+
+    try {
+      final info = await SmartColdConnectionManager.readLocalDeviceInfo();
+
+      if (!mounted) return;
+
+      setState(() {
+        _localDeviceInfo = info;
+        _localEspAvailable = info != null;
+      });
+    } finally {
+      _checkingLocalEsp = false;
     }
   }
 
@@ -2395,30 +2422,26 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
       // SALIR DE SERVICIO:
       // Primero intenta salida local por AP del ESP.
       if (!targetMode) {
-        try {
-          final localResponse = await http
-              .post(
-                Uri.parse('http://192.168.4.1/api/service/finish'),
-                headers: {'Content-Type': 'application/json'},
-              )
-              .timeout(const Duration(seconds: 4));
+        final localInfo =
+            await SmartColdConnectionManager.readLocalDeviceInfo();
 
-          if (localResponse.statusCode == 200) {
-            if (!mounted) return;
+        final localExitOk = localInfo != null
+            ? await LocalEspService.finishServiceMode()
+            : false;
 
-            setState(() {
-              _serviceModeRequestInProgress = false;
-              _pendingServiceModeTarget = null;
-            });
+        if (localExitOk) {
+          if (!mounted) return;
 
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Salida local enviada al equipo.')),
-            );
+          setState(() {
+            _serviceModeRequestInProgress = false;
+            _pendingServiceModeTarget = null;
+          });
 
-            return;
-          }
-        } catch (_) {
-          // Si no está conectado al AP local, cae al backend.
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Salida local enviada al equipo.')),
+          );
+
+          return;
         }
       }
 
@@ -2426,22 +2449,10 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
       // Siempre se solicita por backend.
       // SALIR DE SERVICIO:
       // Si la salida local falló, se solicita por backend.
-      final response = await http
-          .post(
-            Uri.parse(
-              'https://smartcold-api-649501100610.us-central1.run.app/api/devices/${widget.deviceId}/service-mode',
-            ),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({'service_mode': targetMode}),
-          )
-          .timeout(const Duration(seconds: 10));
-
-      final body = jsonDecode(response.body);
-
-      if (response.statusCode != 200 || body['success'] != true) {
-        throw Exception(body['message'] ?? 'No se pudo cambiar modo servicio');
-      }
-
+      await BackendService.requestServiceMode(
+        deviceId: widget.deviceId,
+        serviceMode: targetMode,
+      );
       if (!mounted) return;
 
       setState(() {
@@ -2480,31 +2491,9 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
 
   Future<void> _loadConfigSummary({bool lockDial = false}) async {
     try {
-      final response = await http.get(
-        Uri.parse(
-          'https://smartcold-api-649501100610.us-central1.run.app/api/devices/${widget.deviceId}/config-summary',
-        ),
+      final body = await BackendService.getConfigSummary(
+        deviceId: widget.deviceId,
       );
-
-      if (response.statusCode != 200) {
-        if (mounted) {
-          setState(() {
-            _configSummaryLoaded = true;
-          });
-        }
-        return;
-      }
-
-      final body = jsonDecode(response.body);
-
-      if (body['success'] != true) {
-        if (mounted) {
-          setState(() {
-            _configSummaryLoaded = true;
-          });
-        }
-        return;
-      }
 
       if (!mounted) return;
 
@@ -2589,7 +2578,13 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
               final rawServiceMode = data['service_mode'] == true;
               final serviceModeFromStatus =
                   rawServiceMode || rawDeviceMode == 'SERVICE';
-
+              final localDeviceMode = _localDeviceInfo?['device_mode']
+                  ?.toString();
+              final localServiceMode =
+                  _localDeviceInfo?['service_mode'] == true;
+              final serviceModeFromLocal =
+                  _localEspAvailable &&
+                  (localServiceMode || localDeviceMode == 'SERVICE');
               if (_currentUserRole == null) {
                 return const Center(child: CircularProgressIndicator());
               }
@@ -2671,6 +2666,7 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
                       final serviceRequested =
                           serviceAccessStatus == 'requested';
                       final serviceActive =
+                          serviceModeFromLocal ||
                           serviceAccessStatus == 'active' ||
                           serviceModeFromStatus;
                       final serviceExitRequested =
@@ -2816,30 +2812,11 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
                                             ),
                                           );
 
-                                          final response = await http.post(
-                                            Uri.parse(
-                                              'https://smartcold-api-649501100610.us-central1.run.app/api/devices/${widget.deviceId}/cooling-level',
-                                            ),
-                                            headers: {
-                                              'Content-Type':
-                                                  'application/json',
-                                            },
-                                            body: jsonEncode({
-                                              'cooling_level': levelToSave,
-                                            }),
-                                          );
-
-                                          final body = jsonDecode(
-                                            response.body,
-                                          );
-
-                                          if (response.statusCode != 200 ||
-                                              body['success'] != true) {
-                                            throw Exception(
-                                              body['message'] ??
-                                                  'No se pudo guardar el ajuste',
-                                            );
-                                          }
+                                          final body =
+                                              await BackendService.updateCoolingLevel(
+                                                deviceId: widget.deviceId,
+                                                coolingLevel: levelToSave,
+                                              );
 
                                           if (!context.mounted) return;
 
