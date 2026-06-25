@@ -87,6 +87,10 @@ class AuthGate extends StatelessWidget {
               return const AccessDeniedPage(message: 'Usuario inactivo.');
             }
 
+            if (userData['must_change_password'] == true) {
+              return const ForcePasswordChangePage();
+            }
+
             return DevicesPage(userData: userData);
           },
         );
@@ -100,6 +104,191 @@ class LoginPage extends StatefulWidget {
 
   @override
   State<LoginPage> createState() => _LoginPageState();
+}
+
+class ForcePasswordChangePage extends StatefulWidget {
+  const ForcePasswordChangePage({super.key});
+
+  @override
+  State<ForcePasswordChangePage> createState() =>
+      _ForcePasswordChangePageState();
+}
+
+class _ForcePasswordChangePageState extends State<ForcePasswordChangePage> {
+  final _newPasswordController = TextEditingController();
+  final _confirmPasswordController = TextEditingController();
+
+  bool _loading = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _newPasswordController.dispose();
+    _confirmPasswordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _changePassword() async {
+    final user = FirebaseAuth.instance.currentUser;
+    final newPassword = _newPasswordController.text.trim();
+    final confirmPassword = _confirmPasswordController.text.trim();
+
+    if (user == null) return;
+
+    if (newPassword.length < 8) {
+      setState(() {
+        _error = 'La nueva clave debe tener al menos 8 caracteres.';
+      });
+      return;
+    }
+
+    if (newPassword != confirmPassword) {
+      setState(() {
+        _error = 'Las claves no coinciden.';
+      });
+      return;
+    }
+
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+
+    try {
+      await user.updatePassword(newPassword);
+
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .update({
+            'must_change_password': false,
+            'temporary_password_used': false,
+            'password_changed_at': DateTime.now().toIso8601String(),
+            'updated_at': DateTime.now().toIso8601String(),
+          });
+
+      await FirebaseAuth.instance.signOut();
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _error = 'Error cambiando clave: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF020B14),
+      body: SafeArea(
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(22),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 420),
+              child: Card(
+                color: const Color(0xFF061A2E),
+                child: Padding(
+                  padding: const EdgeInsets.all(22),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.lock_reset_rounded,
+                        color: Color(0xFF00A8FF),
+                        size: 54,
+                      ),
+                      const SizedBox(height: 14),
+                      const Text(
+                        'Cambiar clave temporal',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      const Text(
+                        'Por seguridad debes crear una nueva clave antes de usar SmartCold.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Color(0xFF9DB0C1),
+                          fontSize: 14,
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      TextField(
+                        controller: _newPasswordController,
+                        obscureText: true,
+                        decoration: const InputDecoration(
+                          labelText: 'Nueva clave',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _confirmPasswordController,
+                        obscureText: true,
+                        decoration: const InputDecoration(
+                          labelText: 'Confirmar nueva clave',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      if (_error != null) ...[
+                        const SizedBox(height: 12),
+                        Text(
+                          _error!,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(color: Colors.redAccent),
+                        ),
+                      ],
+                      const SizedBox(height: 18),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          onPressed: _loading ? null : _changePassword,
+                          icon: _loading
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.check_rounded),
+                          label: Text(
+                            _loading ? 'Guardando...' : 'Cambiar clave',
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      TextButton.icon(
+                        onPressed: _loading
+                            ? null
+                            : () async {
+                                await FirebaseAuth.instance.signOut();
+                              },
+                        icon: const Icon(Icons.logout_rounded),
+                        label: const Text('Cerrar sesión'),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class AccessDeniedPage extends StatelessWidget {
@@ -1027,11 +1216,20 @@ class _DeviceSummaryCard extends StatelessWidget {
         .doc(deviceId);
 
     final name = deviceData['name']?.toString() ?? deviceId;
-    final type = deviceData['type']?.toString() ?? 'Equipo';
-    final storeName =
-        deviceData['store_name']?.toString() ??
-        deviceData['current_store_id']?.toString() ??
-        'Tienda sin nombre';
+    final equipmentType =
+        deviceData['equipment_type']?.toString() ?? 'refrigerator';
+
+    final type = equipmentType == 'freezer' ? 'Congelador' : 'Refrigerador';
+    final assigned =
+        deviceData['current_client_id'] != null &&
+        deviceData['current_client_id'].toString().isNotEmpty &&
+        deviceData['current_store_id'] != null &&
+        deviceData['current_store_id'].toString().isNotEmpty;
+    final storeName = assigned
+        ? (deviceData['current_store_name']?.toString() ??
+              deviceData['current_store_id']?.toString() ??
+              'Tienda sin nombre')
+        : 'Pendiente de asignar';
 
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
       stream: statusRef.snapshots(),
@@ -1040,9 +1238,10 @@ class _DeviceSummaryCard extends StatelessWidget {
 
         final state = statusData?['device_state']?.toString() ?? 'SIN DATOS';
         final health = statusData?['device_health']?.toString() ?? 'UNKNOWN';
-        final serviceMode =
-            statusData?['service_mode'] == true ||
-            statusData?['device_mode']?.toString() == 'SERVICE';
+        final rawDeviceMode = statusData?['device_mode']?.toString();
+        final rawServiceMode = statusData?['service_mode'] == true;
+
+        final serviceMode = rawServiceMode || rawDeviceMode == 'SERVICE';
         final healthReason =
             statusData?['device_health_reason']?.toString() ?? '';
         final chamberTemp = _readSensor(statusData, 'chamber');
@@ -1103,15 +1302,34 @@ class _DeviceSummaryCard extends StatelessWidget {
                               ),
                             ),
                             const SizedBox(height: 3),
-                            Text(
-                              '$storeName · $type',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: Color(0xFF9DB0C1),
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                              ),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    'Local: $storeName',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      color: Color(0xFF9DB0C1),
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  type == 'refrigeration_controller'
+                                      ? 'Refrigerador'
+                                      : type,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Color(0xFF00A8FF),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ],
                             ),
                           ],
                         ),
@@ -1152,6 +1370,25 @@ class _DeviceSummaryCard extends StatelessWidget {
                       ),
                     ],
                   ),
+                  if (!assigned) ...[
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) =>
+                                  AssignDevicePage(deviceId: deviceId),
+                            ),
+                          );
+                        },
+                        icon: const Icon(Icons.link_rounded),
+                        label: const Text('Asignar equipo'),
+                      ),
+                    ),
+                  ],
                   if (hasWarning || isOffline) ...[
                     const SizedBox(height: 10),
                     Text(
@@ -1446,6 +1683,616 @@ class _LoginPageState extends State<LoginPage> {
   }
 }
 
+class AssignDevicePage extends StatefulWidget {
+  const AssignDevicePage({super.key, required this.deviceId});
+
+  final String deviceId;
+
+  @override
+  State<AssignDevicePage> createState() => _AssignDevicePageState();
+}
+
+class _AssignDevicePageState extends State<AssignDevicePage> {
+  String? _selectedClientId;
+  String? _selectedStoreId;
+
+  final _deviceNameController = TextEditingController();
+
+  bool _loading = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _deviceNameController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _assignDevice() async {
+    final deviceName = _deviceNameController.text.trim();
+
+    if (_selectedClientId == null || _selectedStoreId == null) {
+      setState(() {
+        _error = 'Selecciona cliente y local.';
+      });
+      return;
+    }
+
+    if (deviceName.isEmpty) {
+      setState(() {
+        _error = 'Ingresa el nombre del equipo.';
+      });
+      return;
+    }
+
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+
+    try {
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+
+      final response = await http.post(
+        Uri.parse(
+          'https://smartcold-api-649501100610.us-central1.run.app/api/devices/${widget.deviceId}/assign',
+        ),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'client_id': _selectedClientId,
+          'store_id': _selectedStoreId,
+          'device_name': deviceName,
+          'assigned_by': uid,
+        }),
+      );
+
+      final body = jsonDecode(response.body);
+
+      if (response.statusCode != 200 || body['success'] != true) {
+        throw Exception(body['message'] ?? 'No se pudo asignar el equipo');
+      }
+
+      if (!mounted) return;
+
+      await showDialog<void>(
+        context: context,
+        builder: (context) {
+          return AlertDialog(
+            title: const Text('Equipo asignado'),
+            content: Text(
+              'El equipo "${widget.deviceId}" fue asignado correctamente.',
+            ),
+            actions: [
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Aceptar'),
+              ),
+            ],
+          );
+        },
+      );
+
+      if (!mounted) return;
+      Navigator.pop(context);
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _error = 'Error asignando equipo: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    Query<Map<String, dynamic>> storesQuery = FirebaseFirestore.instance
+        .collection('stores')
+        .where('active', isEqualTo: true);
+
+    if (_selectedClientId != null) {
+      storesQuery = storesQuery.where(
+        'client_id',
+        isEqualTo: _selectedClientId,
+      );
+    }
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF020B14),
+      appBar: AppBar(
+        title: const Text('Asignar equipo'),
+        backgroundColor: const Color(0xFF061A2E),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Text(
+            widget.deviceId,
+            style: const TextStyle(
+              color: Color(0xFF9DB0C1),
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 14),
+
+          _ClientFilterSelector(
+            selectedClientId: _selectedClientId,
+            onChanged: (value) {
+              setState(() {
+                _selectedClientId = value;
+                _selectedStoreId = null;
+              });
+            },
+          ),
+
+          const SizedBox(height: 10),
+
+          StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            stream: storesQuery.snapshots(),
+            builder: (context, snapshot) {
+              final stores = snapshot.data?.docs ?? [];
+
+              return DropdownButtonFormField<String>(
+                value: _selectedStoreId,
+                decoration: const InputDecoration(
+                  labelText: 'Local',
+                  border: OutlineInputBorder(),
+                ),
+                dropdownColor: const Color(0xFF061A2E),
+                items: stores.map((doc) {
+                  final data = doc.data();
+                  final name = data['name']?.toString() ?? 'Local sin nombre';
+
+                  return DropdownMenuItem<String>(
+                    value: doc.id,
+                    child: Text(name),
+                  );
+                }).toList(),
+                onChanged: _selectedClientId == null
+                    ? null
+                    : (value) {
+                        setState(() {
+                          _selectedStoreId = value;
+                        });
+                      },
+              );
+            },
+          ),
+
+          const SizedBox(height: 12),
+
+          TextField(
+            controller: _deviceNameController,
+            decoration: const InputDecoration(
+              labelText: 'Nombre del equipo',
+              border: OutlineInputBorder(),
+            ),
+          ),
+
+          if (_error != null) ...[
+            const SizedBox(height: 12),
+            Text(
+              _error!,
+              style: const TextStyle(
+                color: Colors.redAccent,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ],
+
+          const SizedBox(height: 18),
+
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: _loading ? null : _assignDevice,
+              icon: _loading
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.link_rounded),
+              label: Text(_loading ? 'Asignando...' : 'Asignar equipo'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class DeviceManagementPage extends StatefulWidget {
+  const DeviceManagementPage({super.key, required this.deviceId});
+
+  final String deviceId;
+
+  @override
+  State<DeviceManagementPage> createState() => _DeviceManagementPageState();
+}
+
+class _DeviceManagementPageState extends State<DeviceManagementPage> {
+  final _nameController = TextEditingController();
+
+  String? _selectedClientId;
+  String? _selectedStoreId;
+  String _equipmentType = 'refrigerator';
+
+  bool _loading = true;
+  bool _saving = false;
+  String? _error;
+  Map<String, dynamic> _deviceData = {};
+  Map<String, dynamic> _statusData = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _loadDevice();
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadDevice() async {
+    try {
+      final deviceDoc = await FirebaseFirestore.instance
+          .collection('devices')
+          .doc(widget.deviceId)
+          .get();
+
+      final statusDoc = await FirebaseFirestore.instance
+          .collection('device_status')
+          .doc(widget.deviceId)
+          .get();
+
+      final data = deviceDoc.data() ?? {};
+      final status = statusDoc.data() ?? {};
+
+      _deviceData = data;
+      _statusData = status;
+
+      _nameController.text = data['name']?.toString() ?? '';
+      _selectedClientId = data['current_client_id']?.toString();
+      _selectedStoreId = data['current_store_id']?.toString();
+      _equipmentType = data['equipment_type']?.toString() == 'freezer'
+          ? 'freezer'
+          : 'refrigerator';
+
+      if (!mounted) return;
+
+      setState(() {
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _error = 'Error cargando equipo: $e';
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _saveChanges() async {
+    final deviceName = _nameController.text.trim();
+
+    if (deviceName.isEmpty) {
+      setState(() {
+        _error = 'El nombre del equipo es obligatorio.';
+      });
+      return;
+    }
+
+    if (_selectedClientId == null || _selectedStoreId == null) {
+      setState(() {
+        _error = 'Selecciona cliente y local.';
+      });
+      return;
+    }
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Guardar cambios'),
+          content: const Text(
+            '¿Deseas actualizar la información administrativa de este equipo?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancelar'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Guardar'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirm != true) return;
+
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+
+    try {
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+
+      final response = await http.post(
+        Uri.parse(
+          'https://smartcold-api-649501100610.us-central1.run.app/api/devices/${widget.deviceId}/assign',
+        ),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'client_id': _selectedClientId,
+          'store_id': _selectedStoreId,
+          'device_name': deviceName,
+          'equipment_type': _equipmentType,
+          'assigned_by': uid,
+          'reason': 'ADMIN_UPDATE',
+        }),
+      );
+
+      final body = jsonDecode(response.body);
+
+      if (response.statusCode != 200 || body['success'] != true) {
+        throw Exception(body['message'] ?? 'No se pudo actualizar el equipo');
+      }
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Equipo actualizado correctamente')),
+      );
+
+      Navigator.pop(context);
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _error = 'Error guardando cambios: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _saving = false;
+        });
+      }
+    }
+  }
+
+  String _equipmentTypeLabel(String value) {
+    if (value == 'freezer') return 'Congelador';
+    return 'Refrigerador';
+  }
+
+  String _onlineText() {
+    if (_statusData['online'] == true) {
+      return 'ONLINE';
+    }
+
+    return 'OFFLINE';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    Query<Map<String, dynamic>> storesQuery = FirebaseFirestore.instance
+        .collection('stores')
+        .where('active', isEqualTo: true);
+
+    if (_selectedClientId != null) {
+      storesQuery = storesQuery.where(
+        'client_id',
+        isEqualTo: _selectedClientId,
+      );
+    }
+
+    return Scaffold(
+      backgroundColor: const Color(0xFF020B14),
+      appBar: AppBar(
+        title: const Text('Administrar equipo'),
+        backgroundColor: const Color(0xFF061A2E),
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                Text(
+                  widget.deviceId,
+                  style: const TextStyle(
+                    color: Color(0xFF9DB0C1),
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 14),
+
+                TextField(
+                  controller: _nameController,
+                  decoration: const InputDecoration(
+                    labelText: 'Nombre del equipo',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+
+                const SizedBox(height: 14),
+
+                SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment(
+                      value: 'refrigerator',
+                      label: Text('Refrigerador'),
+                      icon: Icon(Icons.kitchen_rounded),
+                    ),
+                    ButtonSegment(
+                      value: 'freezer',
+                      label: Text('Congelador'),
+                      icon: Icon(Icons.ac_unit_rounded),
+                    ),
+                  ],
+                  selected: {_equipmentType},
+                  onSelectionChanged: (values) {
+                    setState(() {
+                      _equipmentType = values.first;
+                    });
+                  },
+                ),
+
+                const SizedBox(height: 14),
+
+                _ClientFilterSelector(
+                  selectedClientId: _selectedClientId,
+                  onChanged: (value) {
+                    setState(() {
+                      _selectedClientId = value;
+                      _selectedStoreId = null;
+                    });
+                  },
+                ),
+
+                const SizedBox(height: 10),
+
+                StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                  stream: storesQuery.snapshots(),
+                  builder: (context, snapshot) {
+                    final stores = snapshot.data?.docs ?? [];
+
+                    return DropdownButtonFormField<String>(
+                      value: _selectedStoreId,
+                      decoration: const InputDecoration(
+                        labelText: 'Local',
+                        border: OutlineInputBorder(),
+                      ),
+                      dropdownColor: const Color(0xFF061A2E),
+                      items: stores.map((doc) {
+                        final data = doc.data();
+                        final name =
+                            data['name']?.toString() ?? 'Local sin nombre';
+
+                        return DropdownMenuItem<String>(
+                          value: doc.id,
+                          child: Text(name),
+                        );
+                      }).toList(),
+                      onChanged: _selectedClientId == null
+                          ? null
+                          : (value) {
+                              setState(() {
+                                _selectedStoreId = value;
+                              });
+                            },
+                    );
+                  },
+                ),
+
+                if (_error != null) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    _error!,
+                    style: const TextStyle(
+                      color: Colors.redAccent,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ],
+
+                const SizedBox(height: 18),
+
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: _saving ? null : _saveChanges,
+                    icon: _saving
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.save_rounded),
+                    label: Text(_saving ? 'Guardando...' : 'Guardar cambios'),
+                  ),
+                ),
+
+                const SizedBox(height: 18),
+
+                const SizedBox(height: 24),
+
+                const Text(
+                  'Información del controlador',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w900,
+                    fontSize: 18,
+                  ),
+                ),
+
+                const SizedBox(height: 14),
+
+                _AccountInfoTile(
+                  icon: Icons.memory_rounded,
+                  title: 'Device ID',
+                  value: widget.deviceId,
+                ),
+
+                _AccountInfoTile(
+                  icon: Icons.developer_board_rounded,
+                  title: 'Hardware UID',
+                  value: _deviceData['hardware_uid'] ?? '',
+                ),
+
+                _AccountInfoTile(
+                  icon: Icons.system_update_alt_rounded,
+                  title: 'Firmware',
+                  value: _deviceData['firmware_version'] ?? '',
+                ),
+
+                _AccountInfoTile(
+                  icon: Icons.category_rounded,
+                  title: 'Tipo',
+                  value: _equipmentTypeLabel(_equipmentType),
+                ),
+
+                _AccountInfoTile(
+                  icon: Icons.wifi_rounded,
+                  title: 'Estado',
+                  value:
+                      '${_onlineText()}   RSSI ${_statusData['rssi'] ?? '--'} dBm',
+                ),
+
+                _AccountInfoTile(
+                  icon: Icons.schedule_rounded,
+                  title: 'Última conexión',
+                  value: _statusData['last_seen_at'] ?? '',
+                ),
+
+                _AccountInfoTile(
+                  icon: Icons.event_available_rounded,
+                  title: 'Instalado',
+                  value: _deviceData['commissioned_at'] ?? '',
+                ),
+
+                _AccountInfoTile(
+                  icon: Icons.person_outline_rounded,
+                  title: 'Instalador',
+                  value: _deviceData['installer_uid'] ?? '',
+                ),
+              ],
+            ),
+    );
+  }
+}
+
 class DeviceStatusPage extends StatefulWidget {
   const DeviceStatusPage({super.key, required this.deviceId});
 
@@ -1466,17 +2313,163 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
   double? _configTurnOnTemp;
   double? _configTurnOffTemp;
   String? _lastConfigAckSeen;
+  String? _currentUserRole;
+  bool _serviceModeRequestInProgress = false;
+  bool? _pendingServiceModeTarget;
 
   @override
   void initState() {
     super.initState();
     _loadConfigSummary();
+    _loadCurrentUserRole();
 
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) {
         setState(() {});
       }
     });
+  }
+
+  Future<void> _loadCurrentUserRole() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+
+    if (uid == null) return;
+
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(uid)
+          .get();
+
+      final role = doc.data()?['role']?.toString() ?? 'client';
+
+      if (!mounted) return;
+
+      setState(() {
+        _currentUserRole = role;
+      });
+    } catch (_) {
+      if (!mounted) return;
+
+      setState(() {
+        _currentUserRole = 'client';
+      });
+    }
+  }
+
+  Future<void> _requestServiceModeChange(bool targetMode) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text(
+            targetMode ? 'Entrar en modo servicio' : 'Salir de modo servicio',
+          ),
+          content: Text(
+            targetMode
+                ? 'Se solicitará al equipo que habilite el AP técnico. El modo servicio se activará cuando el técnico se conecte al AP.'
+                : 'El equipo saldrá del modo servicio y volverá a operación normal.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancelar'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Confirmar'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirm != true) return;
+
+    setState(() {
+      _serviceModeRequestInProgress = true;
+      _pendingServiceModeTarget = targetMode;
+    });
+
+    try {
+      // SALIR DE SERVICIO:
+      // Primero intenta salida local por AP del ESP.
+      if (!targetMode) {
+        try {
+          final localResponse = await http
+              .post(
+                Uri.parse('http://192.168.4.1/api/service/finish'),
+                headers: {'Content-Type': 'application/json'},
+              )
+              .timeout(const Duration(seconds: 4));
+
+          if (localResponse.statusCode == 200) {
+            if (!mounted) return;
+
+            setState(() {
+              _serviceModeRequestInProgress = false;
+              _pendingServiceModeTarget = null;
+            });
+
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Salida local enviada al equipo.')),
+            );
+
+            return;
+          }
+        } catch (_) {
+          // Si no está conectado al AP local, cae al backend.
+        }
+      }
+
+      // ENTRAR DE SERVICIO:
+      // Siempre se solicita por backend.
+      // SALIR DE SERVICIO:
+      // Si la salida local falló, se solicita por backend.
+      final response = await http
+          .post(
+            Uri.parse(
+              'https://smartcold-api-649501100610.us-central1.run.app/api/devices/${widget.deviceId}/service-mode',
+            ),
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'service_mode': targetMode}),
+          )
+          .timeout(const Duration(seconds: 10));
+
+      final body = jsonDecode(response.body);
+
+      if (response.statusCode != 200 || body['success'] != true) {
+        throw Exception(body['message'] ?? 'No se pudo cambiar modo servicio');
+      }
+
+      if (!mounted) return;
+
+      setState(() {
+        _serviceModeRequestInProgress = false;
+        _pendingServiceModeTarget = null;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            targetMode
+                ? 'Solicitud enviada. Conéctate al AP técnico cuando aparezca.'
+                : 'Solicitud enviada. Esperando salida del modo servicio.',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _serviceModeRequestInProgress = false;
+        _pendingServiceModeTarget = null;
+      });
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error solicitando cambio: $e')));
+    }
   }
 
   @override
@@ -1553,6 +2546,9 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
     final configRef = FirebaseFirestore.instance
         .collection('device_config')
         .doc(widget.deviceId);
+    final deviceRef = FirebaseFirestore.instance
+        .collection('devices')
+        .doc(widget.deviceId);
     return Scaffold(
       backgroundColor: const Color(0xFF020B14),
       body: Container(
@@ -1589,11 +2585,18 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
                   child: Text('No existe estado para ${widget.deviceId}'),
                 );
               }
-              final serviceMode = data['service_mode'] == true;
+              final rawDeviceMode = data['device_mode']?.toString();
+              final rawServiceMode = data['service_mode'] == true;
+              final serviceModeFromStatus =
+                  rawServiceMode || rawDeviceMode == 'SERVICE';
 
-              if (serviceMode) {
-                return _ServiceModeNotice(deviceId: widget.deviceId);
+              if (_currentUserRole == null) {
+                return const Center(child: CircularProgressIndicator());
               }
+
+              final canViewServiceDashboard =
+                  _currentUserRole == 'admin' ||
+                  _currentUserRole == 'technician';
               final lastConfigAckAt = data['last_config_ack_at']?.toString();
 
               if (lastConfigAckAt != null) {
@@ -1631,303 +2634,404 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
 
               final chamberTemp = _sensorValue(data, 'chamber');
               final evaporatorTemp = _sensorValue(data, 'evaporator');
-
               return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-                stream: configRef.snapshots(),
-                builder: (context, configSnapshot) {
-                  final configData = configSnapshot.data?.data() ?? {};
-                  final defrostConfig = configData['defrost'];
+                stream: deviceRef.snapshots(),
+                builder: (context, deviceSnapshot) {
+                  final deviceData = deviceSnapshot.data?.data() ?? {};
 
-                  final defrostEnabled =
-                      defrostConfig is Map && defrostConfig['enabled'] == true;
-                  final dripTimeSeconds = defrostConfig is Map
-                      ? int.tryParse(
-                              defrostConfig['drip_time_seconds']?.toString() ??
-                                  '',
-                            ) ??
-                            0
-                      : 0;
+                  final deviceName =
+                      deviceData['name']?.toString() ??
+                      data['device_name']?.toString() ??
+                      data['name']?.toString() ??
+                      widget.deviceId;
 
-                  final dripEnabled = defrostEnabled && dripTimeSeconds > 0;
-                  return Column(
-                    children: [
-                      Expanded(
-                        child: ListView(
-                          padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
-                          children: [
-                            _TopBar(
-                              connectionStatus: connectionStatus,
-                              rssi: data['rssi'],
-                            ),
-                            const SizedBox(height: 14),
+                  final storeName =
+                      deviceData['current_store_name']?.toString() ??
+                      deviceData['store_name']?.toString() ??
+                      deviceData['current_store_id']?.toString() ??
+                      '';
 
-                            _HeroPanel(
-                              deviceName:
-                                  data['device_name'] ??
-                                  data['name'] ??
-                                  widget.deviceId,
-                              health: data['device_health'],
-                              healthReason: data['device_health_reason'],
-                              state: data['device_state'],
-                              online: connectionStatus != 'offline',
-                              rssi: data['rssi'],
-                              compressorOn: data['compressor_relay_on'],
-                              blockReason: data['compressor_block_reason'],
-                            ),
+                  return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+                    stream: configRef.snapshots(),
+                    builder: (context, configSnapshot) {
+                      final configData = configSnapshot.data?.data() ?? {};
+                      final serviceAccessStatus =
+                          configData['service_access_status']?.toString() ??
+                          'inactive';
+                      final serviceRequestedAt =
+                          configData['service_access_requested_at']?.toString();
 
-                            const SizedBox(height: 8),
+                      final serviceRequestExpiresSeconds =
+                          int.tryParse(
+                            configData['service_access_request_expires_seconds']
+                                    ?.toString() ??
+                                '',
+                          ) ??
+                          300;
+                      final serviceRequested =
+                          serviceAccessStatus == 'requested';
+                      final serviceActive =
+                          serviceAccessStatus == 'active' ||
+                          serviceModeFromStatus;
+                      final serviceExitRequested =
+                          serviceAccessStatus == 'exit_requested';
 
-                            _CoolingLevelDial(
-                              level: visibleCoolingLevel,
-                              setpoint: setpoint,
-                              turnOnTemp: turnOnTemp,
-                              turnOffTemp: turnOffTemp,
-                              unlocked: _dialUnlocked,
-                              onUnlockChanged: (value) {
-                                setState(() {
-                                  if (value) {
-                                    _levelBeforeEdit = visibleCoolingLevel;
-                                    _dialUnlocked = true;
-                                    return;
-                                  }
+                      if (serviceActive && !canViewServiceDashboard) {
+                        return _ServiceModeNotice(deviceId: widget.deviceId);
+                      }
+                      final defrostConfig = configData['defrost'];
 
-                                  _selectedCoolingLevel = _levelBeforeEdit;
-                                  _levelBeforeEdit = null;
-                                  _dialUnlocked = false;
-                                });
-                              },
-                              onLevelChanged: (newLevel) {
-                                if (!_dialUnlocked) return;
+                      final defrostEnabled =
+                          defrostConfig is Map &&
+                          defrostConfig['enabled'] == true;
+                      final dripTimeSeconds = defrostConfig is Map
+                          ? int.tryParse(
+                                  defrostConfig['drip_time_seconds']
+                                          ?.toString() ??
+                                      '',
+                                ) ??
+                                0
+                          : 0;
 
-                                setState(() {
-                                  _selectedCoolingLevel = newLevel;
-                                });
-                              },
-                            ),
-
-                            if (_dialUnlocked &&
-                                _selectedCoolingLevel != null &&
-                                _levelBeforeEdit != null &&
-                                _selectedCoolingLevel != _levelBeforeEdit) ...[
-                              const SizedBox(height: 8),
-                              SizedBox(
-                                width: double.infinity,
-                                child: ElevatedButton.icon(
-                                  onPressed: () async {
-                                    final levelToSave = _selectedCoolingLevel;
-
-                                    if (levelToSave == null) return;
-
-                                    try {
-                                      ScaffoldMessenger.of(
-                                        context,
-                                      ).showSnackBar(
-                                        const SnackBar(
-                                          content: Text('Guardando ajuste...'),
-                                          duration: Duration(seconds: 1),
-                                        ),
-                                      );
-
-                                      final response = await http.post(
-                                        Uri.parse(
-                                          'https://smartcold-api-649501100610.us-central1.run.app/api/devices/${widget.deviceId}/cooling-level',
-                                        ),
-                                        headers: {
-                                          'Content-Type': 'application/json',
-                                        },
-                                        body: jsonEncode({
-                                          'cooling_level': levelToSave,
-                                        }),
-                                      );
-
-                                      final body = jsonDecode(response.body);
-
-                                      if (response.statusCode != 200 ||
-                                          body['success'] != true) {
-                                        throw Exception(
-                                          body['message'] ??
-                                              'No se pudo guardar el ajuste',
+                      final dripEnabled = defrostEnabled && dripTimeSeconds > 0;
+                      return Column(
+                        children: [
+                          Expanded(
+                            child: ListView(
+                              padding: const EdgeInsets.fromLTRB(
+                                16,
+                                10,
+                                16,
+                                18,
+                              ),
+                              children: [
+                                _TopBar(
+                                  connectionStatus: connectionStatus,
+                                  rssi: data['rssi'],
+                                ),
+                                const SizedBox(height: 14),
+                                if (canViewServiceDashboard) ...[
+                                  SizedBox(
+                                    width: double.infinity,
+                                    child: OutlinedButton.icon(
+                                      onPressed: () {
+                                        Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                            builder: (_) =>
+                                                DeviceManagementPage(
+                                                  deviceId: widget.deviceId,
+                                                ),
+                                          ),
                                         );
+                                      },
+                                      icon: const Icon(Icons.settings_rounded),
+                                      label: const Text('Administrar equipo'),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 12),
+                                ],
+                                _HeroPanel(
+                                  deviceName: deviceName,
+                                  storeName: storeName,
+                                  health: data['device_health'],
+                                  healthReason: data['device_health_reason'],
+                                  state: data['device_state'],
+                                  online: connectionStatus != 'offline',
+                                  rssi: data['rssi'],
+                                  compressorOn: data['compressor_relay_on'],
+                                  blockReason: data['compressor_block_reason'],
+                                ),
+
+                                const SizedBox(height: 8),
+                                if (canViewServiceDashboard) ...[
+                                  _ServiceToolsBanner(
+                                    deviceId: widget.deviceId,
+                                    serviceAccessStatus: serviceAccessStatus,
+                                    serviceRequested: serviceRequested,
+                                    serviceActive: serviceActive,
+                                    serviceExitRequested: serviceExitRequested,
+                                    serviceRequestedAt: serviceRequestedAt,
+                                    serviceRequestExpiresSeconds:
+                                        serviceRequestExpiresSeconds,
+                                    requestInProgress:
+                                        _serviceModeRequestInProgress,
+                                    onToggleServiceMode:
+                                        _requestServiceModeChange,
+                                  ),
+                                  const SizedBox(height: 12),
+                                ],
+                                _CoolingLevelDial(
+                                  level: visibleCoolingLevel,
+                                  setpoint: setpoint,
+                                  turnOnTemp: turnOnTemp,
+                                  turnOffTemp: turnOffTemp,
+                                  unlocked: _dialUnlocked,
+                                  onUnlockChanged: (value) {
+                                    setState(() {
+                                      if (value) {
+                                        _levelBeforeEdit = visibleCoolingLevel;
+                                        _dialUnlocked = true;
+                                        return;
                                       }
 
-                                      if (!context.mounted) return;
-
-                                      ScaffoldMessenger.of(
-                                        context,
-                                      ).showSnackBar(
-                                        SnackBar(
-                                          content: Text(
-                                            'Nivel $levelToSave guardado',
-                                          ),
-                                          duration: const Duration(seconds: 2),
-                                        ),
-                                      );
-                                      setState(() {
-                                        _configCoolingLevel =
-                                            _intFromDynamic(
-                                              body['cooling_level'],
-                                            ) ??
-                                            levelToSave;
-
-                                        _configSetpoint =
-                                            _doubleFromDynamic(
-                                              body['setpoint'],
-                                            ) ??
-                                            _configSetpoint;
-
-                                        _configTurnOnTemp =
-                                            _doubleFromDynamic(
-                                              body['turn_on_temperature'],
-                                            ) ??
-                                            _configTurnOnTemp;
-
-                                        _configTurnOffTemp =
-                                            _doubleFromDynamic(
-                                              body['turn_off_temperature'],
-                                            ) ??
-                                            _configTurnOffTemp;
-
-                                        _selectedCoolingLevel = null;
-                                        _levelBeforeEdit = null;
-                                        _dialUnlocked = false;
-                                      });
-
-                                      await _loadConfigSummary();
-                                    } catch (e) {
-                                      if (!context.mounted) return;
-
-                                      ScaffoldMessenger.of(
-                                        context,
-                                      ).showSnackBar(
-                                        SnackBar(
-                                          content: Text('Error guardando: $e'),
-                                          duration: const Duration(seconds: 4),
-                                        ),
-                                      );
-                                    }
+                                      _selectedCoolingLevel = _levelBeforeEdit;
+                                      _levelBeforeEdit = null;
+                                      _dialUnlocked = false;
+                                    });
                                   },
-                                  icon: const Icon(Icons.save_rounded),
-                                  label: const Text('Guardar ajuste'),
+                                  onLevelChanged: (newLevel) {
+                                    if (!_dialUnlocked) return;
+
+                                    setState(() {
+                                      _selectedCoolingLevel = newLevel;
+                                    });
+                                  },
                                 ),
-                              ),
-                            ],
 
-                            const SizedBox(height: 18),
+                                if (_dialUnlocked &&
+                                    _selectedCoolingLevel != null &&
+                                    _levelBeforeEdit != null &&
+                                    _selectedCoolingLevel !=
+                                        _levelBeforeEdit) ...[
+                                  const SizedBox(height: 8),
+                                  SizedBox(
+                                    width: double.infinity,
+                                    child: ElevatedButton.icon(
+                                      onPressed: () async {
+                                        final levelToSave =
+                                            _selectedCoolingLevel;
 
-                            LayoutBuilder(
-                              builder: (context, constraints) {
-                                return GridView.count(
-                                  shrinkWrap: true,
-                                  physics: const NeverScrollableScrollPhysics(),
-                                  crossAxisCount: 3,
-                                  crossAxisSpacing: 8,
-                                  mainAxisSpacing: 8,
-                                  childAspectRatio: constraints.maxWidth < 430
-                                      ? 0.95
-                                      : 1.25,
-                                  children: [
-                                    _KpiCard(
-                                      title: 'Cámara',
-                                      value: chamberTemp,
-                                      suffix: '°C',
-                                      icon: Icons.thermostat_rounded,
-                                      badgeText: _sensorAlarmText(
-                                        data,
-                                        'chamber',
-                                      ),
-                                      accent: const Color(0xFF1EA7FF),
+                                        if (levelToSave == null) return;
+
+                                        try {
+                                          ScaffoldMessenger.of(
+                                            context,
+                                          ).showSnackBar(
+                                            const SnackBar(
+                                              content: Text(
+                                                'Guardando ajuste...',
+                                              ),
+                                              duration: Duration(seconds: 1),
+                                            ),
+                                          );
+
+                                          final response = await http.post(
+                                            Uri.parse(
+                                              'https://smartcold-api-649501100610.us-central1.run.app/api/devices/${widget.deviceId}/cooling-level',
+                                            ),
+                                            headers: {
+                                              'Content-Type':
+                                                  'application/json',
+                                            },
+                                            body: jsonEncode({
+                                              'cooling_level': levelToSave,
+                                            }),
+                                          );
+
+                                          final body = jsonDecode(
+                                            response.body,
+                                          );
+
+                                          if (response.statusCode != 200 ||
+                                              body['success'] != true) {
+                                            throw Exception(
+                                              body['message'] ??
+                                                  'No se pudo guardar el ajuste',
+                                            );
+                                          }
+
+                                          if (!context.mounted) return;
+
+                                          ScaffoldMessenger.of(
+                                            context,
+                                          ).showSnackBar(
+                                            SnackBar(
+                                              content: Text(
+                                                'Nivel $levelToSave guardado',
+                                              ),
+                                              duration: const Duration(
+                                                seconds: 2,
+                                              ),
+                                            ),
+                                          );
+                                          setState(() {
+                                            _configCoolingLevel =
+                                                _intFromDynamic(
+                                                  body['cooling_level'],
+                                                ) ??
+                                                levelToSave;
+
+                                            _configSetpoint =
+                                                _doubleFromDynamic(
+                                                  body['setpoint'],
+                                                ) ??
+                                                _configSetpoint;
+
+                                            _configTurnOnTemp =
+                                                _doubleFromDynamic(
+                                                  body['turn_on_temperature'],
+                                                ) ??
+                                                _configTurnOnTemp;
+
+                                            _configTurnOffTemp =
+                                                _doubleFromDynamic(
+                                                  body['turn_off_temperature'],
+                                                ) ??
+                                                _configTurnOffTemp;
+
+                                            _selectedCoolingLevel = null;
+                                            _levelBeforeEdit = null;
+                                            _dialUnlocked = false;
+                                          });
+
+                                          await _loadConfigSummary();
+                                        } catch (e) {
+                                          if (!context.mounted) return;
+
+                                          ScaffoldMessenger.of(
+                                            context,
+                                          ).showSnackBar(
+                                            SnackBar(
+                                              content: Text(
+                                                'Error guardando: $e',
+                                              ),
+                                              duration: const Duration(
+                                                seconds: 4,
+                                              ),
+                                            ),
+                                          );
+                                        }
+                                      },
+                                      icon: const Icon(Icons.save_rounded),
+                                      label: const Text('Guardar ajuste'),
                                     ),
-                                    _KpiCard(
-                                      title: 'Evaporador',
-                                      value: evaporatorTemp,
-                                      suffix: '°C',
-                                      icon: Icons.ac_unit_rounded,
-                                      badgeText: _sensorAlarmText(
-                                        data,
-                                        'evaporator',
-                                      ),
-                                      accent: const Color(0xFF21B9FF),
+                                  ),
+                                ],
+
+                                const SizedBox(height: 18),
+
+                                LayoutBuilder(
+                                  builder: (context, constraints) {
+                                    return GridView.count(
+                                      shrinkWrap: true,
+                                      physics:
+                                          const NeverScrollableScrollPhysics(),
+                                      crossAxisCount: 3,
+                                      crossAxisSpacing: 8,
+                                      mainAxisSpacing: 8,
+                                      childAspectRatio:
+                                          constraints.maxWidth < 430
+                                          ? 0.95
+                                          : 1.25,
+                                      children: [
+                                        _KpiCard(
+                                          title: 'Cámara',
+                                          value: chamberTemp,
+                                          suffix: '°C',
+                                          icon: Icons.thermostat_rounded,
+                                          badgeText: _sensorAlarmText(
+                                            data,
+                                            'chamber',
+                                          ),
+                                          accent: const Color(0xFF1EA7FF),
+                                        ),
+                                        _KpiCard(
+                                          title: 'Evaporador',
+                                          value: evaporatorTemp,
+                                          suffix: '°C',
+                                          icon: Icons.ac_unit_rounded,
+                                          badgeText: _sensorAlarmText(
+                                            data,
+                                            'evaporator',
+                                          ),
+                                          accent: const Color(0xFF21B9FF),
+                                        ),
+                                        _MiniCompressorKpi(
+                                          relayOn: data['compressor_relay_on'],
+                                          shouldBeOn:
+                                              data['compressor_should_be_on'],
+                                          protectionSeconds:
+                                              data['compressor_wait_seconds_remaining'],
+                                          connectionStatus: connectionStatus,
+                                          secondsSinceLastSeen:
+                                              secondsSinceLastSeen,
+                                        ),
+                                      ],
+                                    );
+                                  },
+                                ),
+                                if (defrostEnabled || dripEnabled) ...[
+                                  const SizedBox(height: 12),
+
+                                  IntrinsicHeight(
+                                    child: Row(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.stretch,
+                                      children: [
+                                        if (defrostEnabled)
+                                          Expanded(
+                                            child: _DefrostCard(
+                                              active: data['defrost_active'],
+                                              evaporatorTemp: evaporatorTemp,
+                                              chamberTemp: chamberTemp,
+                                              endTemperature:
+                                                  defrostConfig['end_temperature'],
+                                              remainingSeconds:
+                                                  data['defrost_remaining_seconds'],
+                                              nextSeconds:
+                                                  data['defrost_next_seconds'],
+                                              durationMinutes:
+                                                  defrostConfig['duration_minutes'],
+                                              intervalMinutes:
+                                                  defrostConfig['interval_minutes'],
+                                              connectionStatus:
+                                                  connectionStatus,
+                                              secondsSinceLastSeen:
+                                                  secondsSinceLastSeen,
+                                            ),
+                                          ),
+
+                                        if (defrostEnabled && dripEnabled)
+                                          const SizedBox(width: 8),
+
+                                        if (dripEnabled)
+                                          Expanded(
+                                            child: _DripCard(
+                                              active: data['drip_active'],
+                                              configuredSeconds:
+                                                  dripTimeSeconds,
+                                              remainingSeconds:
+                                                  data['drip_remaining_seconds'],
+                                              connectionStatus:
+                                                  connectionStatus,
+                                              secondsSinceLastSeen:
+                                                  secondsSinceLastSeen,
+                                            ),
+                                          ),
+                                      ],
                                     ),
-                                    _MiniCompressorKpi(
-                                      relayOn: data['compressor_relay_on'],
-                                      shouldBeOn:
-                                          data['compressor_should_be_on'],
-                                      protectionSeconds:
-                                          data['compressor_wait_seconds_remaining'],
-                                      connectionStatus: connectionStatus,
-                                      secondsSinceLastSeen:
-                                          secondsSinceLastSeen,
-                                    ),
-                                  ],
-                                );
-                              },
+                                  ),
+                                ],
+                              ],
                             ),
-                            if (defrostEnabled || dripEnabled) ...[
-                              const SizedBox(height: 12),
-
-                              IntrinsicHeight(
-                                child: Row(
-                                  crossAxisAlignment:
-                                      CrossAxisAlignment.stretch,
-                                  children: [
-                                    if (defrostEnabled)
-                                      Expanded(
-                                        child: _DefrostCard(
-                                          active: data['defrost_active'],
-                                          evaporatorTemp: evaporatorTemp,
-                                          chamberTemp: chamberTemp,
-                                          endTemperature:
-                                              defrostConfig['end_temperature'],
-                                          remainingSeconds:
-                                              data['defrost_remaining_seconds'],
-                                          nextSeconds:
-                                              data['defrost_next_seconds'],
-                                          durationMinutes:
-                                              defrostConfig['duration_minutes'],
-                                          intervalMinutes:
-                                              defrostConfig['interval_minutes'],
-                                          connectionStatus: connectionStatus,
-                                          secondsSinceLastSeen:
-                                              secondsSinceLastSeen,
-                                        ),
-                                      ),
-
-                                    if (defrostEnabled && dripEnabled)
-                                      const SizedBox(width: 8),
-
-                                    if (dripEnabled)
-                                      Expanded(
-                                        child: _DripCard(
-                                          active: data['drip_active'],
-                                          configuredSeconds: dripTimeSeconds,
-                                          remainingSeconds:
-                                              data['drip_remaining_seconds'],
-                                          connectionStatus: connectionStatus,
-                                          secondsSinceLastSeen:
-                                              secondsSinceLastSeen,
-                                        ),
-                                      ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                      ),
-
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: Text(
-                          lastUpdateText,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: Color(0xFF9DB0C1),
-                            fontSize: 11,
-                            fontWeight: FontWeight.w600,
                           ),
-                        ),
-                      ),
-                    ],
+
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 10),
+                            child: Text(
+                              lastUpdateText,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                color: Color(0xFF9DB0C1),
+                                fontSize: 11,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
                   );
                 },
               );
@@ -2059,6 +3163,150 @@ class _DeviceStatusPageState extends State<DeviceStatusPage> {
       }
     }
     return 'NORMAL';
+  }
+}
+
+class _ServiceToolsBanner extends StatelessWidget {
+  const _ServiceToolsBanner({
+    required this.deviceId,
+    required this.serviceAccessStatus,
+    required this.serviceRequested,
+    required this.serviceActive,
+    required this.serviceExitRequested,
+    required this.serviceRequestedAt,
+    required this.serviceRequestExpiresSeconds,
+    required this.requestInProgress,
+    required this.onToggleServiceMode,
+  });
+
+  final String deviceId;
+  final String serviceAccessStatus;
+  final bool serviceRequested;
+  final bool serviceActive;
+  final bool serviceExitRequested;
+  final String? serviceRequestedAt;
+  final int serviceRequestExpiresSeconds;
+  final bool requestInProgress;
+  final ValueChanged<bool> onToggleServiceMode;
+
+  int _remainingSeconds() {
+    if (!serviceRequested) return 0;
+    if (serviceRequestedAt == null || serviceRequestedAt!.isEmpty) {
+      return serviceRequestExpiresSeconds;
+    }
+
+    final parsed = DateTime.tryParse(serviceRequestedAt!);
+
+    if (parsed == null) return serviceRequestExpiresSeconds;
+
+    final startedAtUtc = DateTime.utc(
+      parsed.year,
+      parsed.month,
+      parsed.day,
+      parsed.hour,
+      parsed.minute,
+      parsed.second,
+      parsed.millisecond,
+      parsed.microsecond,
+    );
+
+    final elapsed = DateTime.now().toUtc().difference(startedAtUtc).inSeconds;
+    final remaining = serviceRequestExpiresSeconds - elapsed;
+
+    return remaining < 0 ? 0 : remaining;
+  }
+
+  String _formatRemaining(int seconds) {
+    final minutes = seconds ~/ 60;
+    final rest = seconds % 60;
+    return '$minutes:${rest.toString().padLeft(2, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final remainingSeconds = _remainingSeconds();
+    final requestExpired = serviceRequested && remainingSeconds <= 0;
+
+    final locked =
+        requestInProgress ||
+        (serviceRequested && !requestExpired && !serviceActive) ||
+        serviceExitRequested;
+
+    final targetMode = !serviceActive;
+
+    final String message;
+    final String buttonText;
+
+    if (serviceActive) {
+      message = 'Modo servicio activo. El AP técnico está disponible.';
+      buttonText = 'Salir de servicio';
+    } else if (serviceExitRequested) {
+      message = 'Salida solicitada. Esperando confirmación del equipo.';
+      buttonText = 'Saliendo...';
+    } else if (serviceRequested && !requestExpired) {
+      message =
+          'AP técnico solicitado. Acércate al equipo y conéctate al WiFi SmartCold-Service. Tiempo restante: ${_formatRemaining(remainingSeconds)}';
+      buttonText = 'Solicitado';
+    } else {
+      message = 'El equipo está operando normalmente.';
+      buttonText = 'Entrar en servicio';
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.orangeAccent.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: Colors.orangeAccent.withValues(alpha: 0.75)),
+      ),
+      child: Row(
+        children: [
+          const Icon(
+            Icons.build_circle_rounded,
+            color: Colors.orangeAccent,
+            size: 32,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Herramientas de servicio',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  requestInProgress ? 'Enviando solicitud...' : message,
+                  style: const TextStyle(
+                    color: Color(0xFFB8C7D5),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  'Estado: $serviceAccessStatus',
+                  style: const TextStyle(
+                    color: Color(0xFF8DA1B2),
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          TextButton(
+            onPressed: locked ? null : () => onToggleServiceMode(targetMode),
+            child: Text(requestInProgress ? 'Esperando...' : buttonText),
+          ),
+        ],
+      ),
+    );
   }
 }
 
@@ -2236,9 +3484,11 @@ class _HeroPanel extends StatelessWidget {
     required this.rssi,
     required this.compressorOn,
     required this.blockReason,
+    required this.storeName,
   });
 
   final dynamic deviceName;
+  final dynamic storeName;
   final dynamic health;
   final dynamic healthReason;
   final dynamic state;
@@ -2250,6 +3500,7 @@ class _HeroPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final nameText = deviceName?.toString() ?? 'Equipo sin nombre';
+    final storeText = storeName?.toString() ?? '';
     final rawState = state?.toString();
     final stateText = _estadoEquipo(rawState);
     final stateColor = _stateColor(rawState);
@@ -2288,6 +3539,21 @@ class _HeroPanel extends StatelessWidget {
               letterSpacing: 0.3,
             ),
           ),
+
+          if (storeText.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            Text(
+              'Local: $storeText',
+              textAlign: TextAlign.center,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: Color(0xFF9DB0C1),
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
           const SizedBox(height: 12),
 
           Container(
@@ -3376,8 +4642,9 @@ class ClientsPage extends StatelessWidget {
             tooltip: 'Nuevo cliente',
             icon: const Icon(Icons.add_business_rounded),
             onPressed: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Nuevo cliente pendiente')),
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const CreateClientPage()),
               );
             },
           ),
@@ -3421,6 +4688,204 @@ class ClientsPage extends StatelessWidget {
             },
           );
         },
+      ),
+    );
+  }
+}
+
+class CreateClientPage extends StatefulWidget {
+  const CreateClientPage({super.key});
+
+  @override
+  State<CreateClientPage> createState() => _CreateClientPageState();
+}
+
+class _CreateClientPageState extends State<CreateClientPage> {
+  final _nameController = TextEditingController();
+  final _cedulaController = TextEditingController();
+  final _emailController = TextEditingController();
+  final _phoneController = TextEditingController();
+
+  bool _loading = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _cedulaController.dispose();
+    _emailController.dispose();
+    _phoneController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _createClient() async {
+    final name = _nameController.text.trim();
+    final cedulaRuc = _cedulaController.text.trim();
+    final email = _emailController.text.trim().toLowerCase();
+    final phone = _phoneController.text.trim();
+
+    if (name.isEmpty || cedulaRuc.isEmpty || email.isEmpty) {
+      setState(() {
+        _error = 'Nombre, cédula/RUC y correo son obligatorios.';
+      });
+      return;
+    }
+
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+
+    try {
+      final response = await http.post(
+        Uri.parse(
+          'https://smartcold-api-649501100610.us-central1.run.app/api/clients',
+        ),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'name': name,
+          'cedula_ruc': cedulaRuc,
+          'email': email,
+          'phone': phone,
+        }),
+      );
+
+      final body = jsonDecode(response.body);
+
+      if (response.statusCode != 200 || body['success'] != true) {
+        throw Exception(body['message'] ?? 'No se pudo crear el cliente');
+      }
+
+      if (!mounted) return;
+
+      await showDialog<void>(
+        context: context,
+        builder: (context) {
+          return AlertDialog(
+            title: const Text('Cliente creado'),
+            content: Text(
+              'Cliente y usuario creados correctamente.\n\n'
+              'Correo: $email\n'
+              'Clave temporal: $cedulaRuc',
+            ),
+            actions: [
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Aceptar'),
+              ),
+            ],
+          );
+        },
+      );
+
+      if (!mounted) return;
+      Navigator.pop(context);
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _error = 'Error creando cliente: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF020B14),
+      appBar: AppBar(
+        title: const Text('Nuevo cliente'),
+        backgroundColor: const Color(0xFF061A2E),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          const Text(
+            'Crear cliente y usuario',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 24,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'El usuario podrá ingresar con su correo y cédula/RUC como clave temporal.',
+            style: TextStyle(color: Color(0xFF9DB0C1)),
+          ),
+          const SizedBox(height: 18),
+
+          TextField(
+            controller: _nameController,
+            decoration: const InputDecoration(
+              labelText: 'Nombre del cliente',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+
+          TextField(
+            controller: _cedulaController,
+            decoration: const InputDecoration(
+              labelText: 'Cédula/RUC',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+
+          TextField(
+            controller: _emailController,
+            keyboardType: TextInputType.emailAddress,
+            decoration: const InputDecoration(
+              labelText: 'Correo de acceso',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+
+          TextField(
+            controller: _phoneController,
+            keyboardType: TextInputType.phone,
+            decoration: const InputDecoration(
+              labelText: 'Teléfono',
+              border: OutlineInputBorder(),
+            ),
+          ),
+
+          if (_error != null) ...[
+            const SizedBox(height: 12),
+            Text(
+              _error!,
+              style: const TextStyle(
+                color: Colors.redAccent,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ],
+
+          const SizedBox(height: 18),
+
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: _loading ? null : _createClient,
+              icon: _loading
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.person_add_alt_1_rounded),
+              label: Text(_loading ? 'Creando...' : 'Crear cliente'),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -3562,6 +5027,23 @@ class _ClientDetailPageState extends State<ClientDetailPage> {
               color: Colors.white,
               fontSize: 18,
               fontWeight: FontWeight.w900,
+            ),
+          ),
+
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => CreateStorePage(clientId: _currentClientId),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.add_business_rounded),
+              label: const Text('Agregar local'),
             ),
           ),
           const SizedBox(height: 10),
@@ -3981,6 +5463,189 @@ class _ClientDocumentSearchSheetState
   }
 }
 
+class CreateStorePage extends StatefulWidget {
+  const CreateStorePage({super.key, required this.clientId});
+
+  final String clientId;
+
+  @override
+  State<CreateStorePage> createState() => _CreateStorePageState();
+}
+
+class _CreateStorePageState extends State<CreateStorePage> {
+  final _nameController = TextEditingController();
+  final _addressController = TextEditingController();
+  final _phoneController = TextEditingController();
+
+  bool _loading = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _addressController.dispose();
+    _phoneController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _createStore() async {
+    final name = _nameController.text.trim();
+    final address = _addressController.text.trim();
+    final phone = _phoneController.text.trim();
+
+    if (name.isEmpty) {
+      setState(() {
+        _error = 'El nombre del local es obligatorio.';
+      });
+      return;
+    }
+
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+
+    try {
+      final response = await http.post(
+        Uri.parse(
+          'https://smartcold-api-649501100610.us-central1.run.app/api/stores',
+        ),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'client_id': widget.clientId,
+          'name': name,
+          'address': address,
+          'phone': phone,
+        }),
+      );
+
+      final body = jsonDecode(response.body);
+
+      if (response.statusCode != 200 || body['success'] != true) {
+        throw Exception(body['message'] ?? 'No se pudo crear el local');
+      }
+
+      if (!mounted) return;
+
+      await showDialog<void>(
+        context: context,
+        builder: (context) {
+          return AlertDialog(
+            title: const Text('Local creado'),
+            content: Text('El local "$name" fue creado correctamente.'),
+            actions: [
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Aceptar'),
+              ),
+            ],
+          );
+        },
+      );
+
+      if (!mounted) return;
+      Navigator.pop(context);
+    } catch (e) {
+      if (!mounted) return;
+
+      setState(() {
+        _error = 'Error creando local: $e';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF020B14),
+      appBar: AppBar(
+        title: const Text('Nuevo local'),
+        backgroundColor: const Color(0xFF061A2E),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          const Text(
+            'Crear local',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 24,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Este local quedará asociado al cliente seleccionado.',
+            style: TextStyle(color: Color(0xFF9DB0C1)),
+          ),
+          const SizedBox(height: 18),
+
+          TextField(
+            controller: _nameController,
+            decoration: const InputDecoration(
+              labelText: 'Nombre del local',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+
+          TextField(
+            controller: _addressController,
+            decoration: const InputDecoration(
+              labelText: 'Dirección',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+
+          TextField(
+            controller: _phoneController,
+            keyboardType: TextInputType.phone,
+            decoration: const InputDecoration(
+              labelText: 'Teléfono',
+              border: OutlineInputBorder(),
+            ),
+          ),
+
+          if (_error != null) ...[
+            const SizedBox(height: 12),
+            Text(
+              _error!,
+              style: const TextStyle(
+                color: Colors.redAccent,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ],
+
+          const SizedBox(height: 18),
+
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: _loading ? null : _createStore,
+              icon: _loading
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.storefront_rounded),
+              label: Text(_loading ? 'Creando...' : 'Crear local'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class StoreDetailPage extends StatefulWidget {
   const StoreDetailPage({
     super.key,
@@ -4346,8 +6011,12 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
       if (!mounted) return;
 
       setState(() {
+        debugPrint('ERROR LEYENDO ESP /api/device-info: $e');
+
         _error =
-            'No se pudo leer el ESP. Verifica que el teléfono esté conectado al AP SmartCold.';
+            'No se pudo leer el ESP.\n\n'
+            'Detalle: $e\n\n'
+            'Verifica que el teléfono esté conectado al AP SmartCold.';
       });
     } finally {
       if (mounted) {
@@ -4583,14 +6252,60 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
       );
 
       if (chamberConfig.isNotEmpty) {
+        final operationMode =
+            chamberConfig['operation_mode']?.toString() == 'freeze'
+            ? 'freeze'
+            : 'refrigerate';
+
+        final coolingLevel =
+            int.tryParse(chamberConfig['cooling_level']?.toString() ?? '') ?? 4;
+
+        final setpoint =
+            double.tryParse(chamberConfig['setpoint']?.toString() ?? '') ??
+            (operationMode == 'freeze'
+                ? {
+                    1: -12.0,
+                    2: -14.0,
+                    3: -16.0,
+                    4: -18.0,
+                    5: -20.0,
+                    6: -22.0,
+                    7: -24.0,
+                  }[coolingLevel]!
+                : {
+                    1: 7.0,
+                    2: 6.0,
+                    3: 5.0,
+                    4: 4.0,
+                    5: 3.0,
+                    6: 2.0,
+                    7: 1.0,
+                  }[coolingLevel]!);
+
+        final differential =
+            double.tryParse(chamberConfig['differential']?.toString() ?? '') ??
+            (operationMode == 'freeze' ? 3.0 : 2.0);
+
         await _sendInitialConfiguration({
-          'operation_mode': chamberConfig['operation_mode'],
-          'cooling_level': chamberConfig['cooling_level'],
-          'setpoint': chamberConfig['setpoint'],
-          'differential': chamberConfig['differential'],
-          'min_off_seconds': chamberConfig['min_off_seconds'],
-          'temp_min_alarm': chamberConfig['temp_min_alarm'],
-          'temp_max_alarm': chamberConfig['temp_max_alarm'],
+          'operation_mode': operationMode,
+          'cooling_level': coolingLevel,
+          'setpoint': setpoint,
+          'differential': differential,
+          'min_off_seconds':
+              int.tryParse(
+                chamberConfig['min_off_seconds']?.toString() ?? '',
+              ) ??
+              180,
+          'temp_min_alarm':
+              double.tryParse(
+                chamberConfig['temp_min_alarm']?.toString() ?? '',
+              ) ??
+              (operationMode == 'freeze' ? setpoint - 4.0 : 0.0),
+          'temp_max_alarm':
+              double.tryParse(
+                chamberConfig['temp_max_alarm']?.toString() ?? '',
+              ) ??
+              (setpoint + differential + 2.0),
         });
       } else {
         await _loadDeviceInfo();
@@ -4832,14 +6547,16 @@ class _NewInstallationPageState extends State<NewInstallationPage> {
           _InstallationActionCard(
             number: 4,
             title: 'Pruebas del equipo',
-            subtitle:
-                'Verificar lecturas, configuración y vista previa del cliente.',
+            subtitle: _deviceInfo?['parameters_configured'] == true
+                ? 'Verificar lecturas, configuración y vista previa del cliente.'
+                : 'Guarda primero la configuración inicial del equipo.',
             completed: false,
             buttonText: 'Abrir pruebas',
             onPressed:
                 _deviceInfo == null ||
                     _loading ||
-                    _deviceInfo?['sensors_assigned'] != true
+                    _deviceInfo?['sensors_assigned'] != true ||
+                    _deviceInfo?['parameters_configured'] != true
                 ? null
                 : _openInstallationTests,
           ),
@@ -4903,6 +6620,7 @@ class SmartColdMonitorView extends StatelessWidget {
       children: [
         _HeroPanel(
           deviceName: deviceName,
+          storeName: data['current_store_name'] ?? '',
           health: data['device_health'],
           healthReason: data['device_health_reason'],
           state: data['device_state'] ?? 'SETUP',
